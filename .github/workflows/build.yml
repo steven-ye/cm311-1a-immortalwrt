@@ -1,0 +1,160 @@
+name: Build CM311-1a ImmortalWrt 25.12.2
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "内核系列"
+        required: false
+        default: "6.6.y"
+        type: choice
+        options:
+          - 6.6.y
+          - 6.1.y
+      kernel_sign:
+        description: "内核签名"
+        required: false
+        default: "-cm311bt"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  TZ: Etc/UTC
+  IMMORTALWRT_VERSION: "25.12.2"
+  BOARD: "s905l3a-cm311"
+
+jobs:
+  # 1. 自编译 S905L3A 内核（含蓝牙模块），产物发布到本仓库 kernel_stable Release
+  kernel:
+    runs-on: ubuntu-26.04-arm
+    env:
+      KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
+      KERNEL_SIGN: ${{ inputs.kernel_sign || '-cm311bt' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 生成内核配置（ophub 模板 + 蓝牙 fragment）
+        run: |
+          mkdir -p kernel-config
+          curl -fsSL "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-${KERNEL_SERIES}" \
+            -o "kernel-config/config-${KERNEL_SERIES}"
+          cat kernel-config/bt.fragment >> "kernel-config/config-${KERNEL_SERIES}"
+          echo "蓝牙相关配置行数: $(grep -c 'CONFIG_BT' "kernel-config/config-${KERNEL_SERIES}")"
+
+      - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
+        uses: ophub/amlogic-s9xxx-armbian@main
+        with:
+          build_target: kernel
+          kernel_source: unifreq
+          kernel_version: ${{ env.KERNEL_SERIES }}
+          kernel_sign: ${{ env.KERNEL_SIGN }}
+          kernel_config: kernel-config
+          kernel_package: all
+
+      - name: 门禁：btusb.ko 必须存在
+        run: |
+          mods="$(ls compile-kernel/output/modules-*.tar.gz | head -n 1)"
+          echo "modules: ${mods}"
+          tar -tzf "${mods}" | grep -q 'drivers/bluetooth/btusb.ko' \
+            || { echo "::error::内核未编入 btusb.ko，蓝牙无法工作"; exit 1; }
+
+      - name: 发布内核到 Release
+        if: env.PACKAGED_STATUS == 'success'
+        uses: ophub/upload-to-releases@main
+        with:
+          tag: kernel_stable
+          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: false
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. ImmortalWrt 25.12.2 armsr/armv8 rootfs（LuCI + bluez + 蓝牙固件）
+  rootfs:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 下载 RTL8761B 固件
+        run: bash scripts/fetch-bt-firmware.sh
+
+      - name: 构建 rootfs [ immortalwrt:${{ env.IMMORTALWRT_VERSION }} ]
+        run: |
+          chmod +x config/imagebuilder/imagebuilder.sh
+          ./config/imagebuilder/imagebuilder.sh "immortalwrt:${IMMORTALWRT_VERSION}"
+
+      - name: 门禁：固件与 bluez 必须存在
+        run: |
+          rootfs="$(ls output/*rootfs.tar.gz | head -n 1)"
+          echo "rootfs: ${rootfs}"
+          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761bu_fw.bin' \
+            || { echo "::error::缺少 rtl8761bu_fw.bin"; exit 1; }
+          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761bu_config.bin' \
+            || { echo "::error::缺少 rtl8761bu_config.bin"; exit 1; }
+          tar -tzf "${rootfs}" | grep -Eq '(sbin|bin)/bluetoothctl' \
+            || { echo "::error::缺少 bluetoothctl"; exit 1; }
+          tar -tzf "${rootfs}" | grep -q 'etc/uci-defaults/99-bluetooth' \
+            || { echo "::error::缺少蓝牙开机启用脚本"; exit 1; }
+
+      - name: 上传 rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs
+          path: output/*rootfs.tar.gz
+          retention-days: 7
+
+  # 3. 组合内核 + rootfs，打包 CM311-1a 可刷镜像
+  image:
+    needs: [kernel, rootfs]
+    runs-on: ubuntu-26.04
+    env:
+      KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 下载 rootfs
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs
+          path: artifacts/rootfs
+
+      - name: 打包镜像 [ ${{ env.BOARD }} ]
+        uses: ophub/amlogic-s9xxx-openwrt@main
+        with:
+          openwrt_path: artifacts/rootfs/*rootfs.tar.gz
+          openwrt_board: ${{ env.BOARD }}
+          openwrt_kernel: ${{ env.KERNEL_SERIES }}
+          auto_kernel: true
+          kernel_repo: ${{ github.repository }}
+          kernel_usage: stable
+          builder_name: steven-ye
+
+      - name: 门禁：镜像产物存在
+        run: |
+          ls -lh ${PACKAGED_OUTPUTPATH}
+          test -n "$(ls ${PACKAGED_OUTPUTPATH}/*.img.gz)"
+
+      - name: 上传镜像到 Release
+        if: env.PACKAGED_STATUS == 'success'
+        uses: ophub/upload-to-releases@main
+        with:
+          tag: firmware_${{ env.IMMORTALWRT_VERSION }}
+          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: true
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ### CM311-1a ImmortalWrt ${{ env.IMMORTALWRT_VERSION }}
+            - 默认 IP: `192.168.1.1`，默认账号 `root`
+            - 蓝牙: RTL8761B（btusb + rtl8761bu 固件，bluez 开机自启）
+            - 刷机: 先写 U 盘启动验证，再在「系统 → 晶晨宝盒」安装到 eMMC，设备选 `CM311-1a-YST`

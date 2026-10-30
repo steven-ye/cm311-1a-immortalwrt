@@ -1,0 +1,4 @@
+#!/bin/sh
+# 开机启用蓝牙服务，保证重启后 hci0 自动恢复
+[ -x /etc/init.d/bluetooth ] && /etc/init.d/bluetooth enable
+exit 0

@@ -5,10 +5,15 @@
 ## 当前进度
 
 - [x] 方案定稿（见 [PLAN.md](./PLAN.md)）
-- [ ] 搭建三条 Actions 流水线（内核 / rootfs / 打包）
-- [ ] 蓝牙内核 config 与固件内置
-- [ ] CI 门禁与首版出包
+- [x] 搭建 Actions 流水线（`build.yml` 三阶段：内核 / rootfs / 打包）
+- [x] 蓝牙内核 config 与固件内置
+- [ ] 首次 Actions 运行与出包
 - [ ] USB 启动验证 → eMMC 安装
+
+## 构建入口
+
+在 Actions 页面运行 **Build CM311-1a ImmortalWrt 25.12.2**（`workflow_dispatch`），或推送 `v*` 标签。
+内核与固件分别发布到本仓库 `kernel_stable`、`firmware_25.12.2` 两个 Release。
 
 ## 方案要点
 

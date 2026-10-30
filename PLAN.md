@@ -26,9 +26,11 @@ ImmortalWrt 25.12.2 官方 target 列表（`dl.wrt.moe/releases/25.12.2/targets/
 
 ## 3. GitHub Actions 流水线
 
-### 3.1 `build-kernel.yml`
+实现为单个 `build.yml`，三个 job 串行依赖（`kernel` / `rootfs` / `image`），用 Artifact + 本仓库 Release 传递产物，比拆成三个文件更可靠。
 
-调用 `ophub/amlogic-s9xxx-armbian@main`：
+### 3.1 kernel job
+
+运行在 `ubuntu-26.04-arm`（ophub 内核编译使用 arm64 Docker 镜像）：
 
 ```yaml
 - uses: ophub/amlogic-s9xxx-armbian@main
@@ -36,42 +38,41 @@ ImmortalWrt 25.12.2 官方 target 列表（`dl.wrt.moe/releases/25.12.2/targets/
     build_target: kernel
     kernel_source: unifreq
     kernel_version: 6.6.y
-    kernel_config: kernel-config      # 本项目仓库内的 config-6.6
+    kernel_config: kernel-config      # config-6.6 + bt.fragment 合并结果
     kernel_sign: -cm311bt
     kernel_package: all
 ```
 
-产物：`boot-6.6.y-cm311bt.tar.gz`、`modules-*.tar.gz`、`dtb-*.tar.gz`，附 sha256；开启 ccache 缓存以缩短重复编译时间。
+构建前从 `ophub/kernel` 拉取 `config-6.6` 模板，追加 `kernel-config/bt.fragment`，再交给编译动作。
+产物（`boot`/`modules`/`dtb`）发布到本仓库 Release `kernel_stable`，供打包 job 通过 `kernel_repo: <本仓库>` 读取。
 
-### 3.2 `build-rootfs.yml`
+### 3.2 rootfs job
 
-1. 下载 `immortalwrt-imagebuilder-25.12.2-armsr-armv8.Linux-x86_64.tar.zst`，校验 sha256，命中 Actions 缓存；
-2. 执行：
+复用 ophub 的 `config/imagebuilder/imagebuilder.sh`，直接支持 `immortalwrt:25.12.2`：
 
 ```bash
-make image PROFILE=generic \
-  PACKAGES="luci luci-base bluez-daemon bluez-utils dbus" \
-  FILES=files/
+./config/imagebuilder/imagebuilder.sh immortalwrt:25.12.2
 ```
 
-**不安装任何 `kmod-*` 包**，避免替换内核后 ABI 不匹配、白白占用空间。
+- 包清单在 `config/imagebuilder/config`（bluez-daemon、bluez-utils、dbus 等）；
+- 从脚本内置包列表中移除 `kmod-*`，避免替换内核后 ABI 不匹配；
+- 自定义覆盖层在 `config/imagebuilder/files/`（蓝牙固件、开机启用脚本）。
 
-### 3.3 `build-image.yml`
-
-1. 拉取 3.1、3.2 的产物；
-2. 调用打包动作：
+### 3.3 image job
 
 ```yaml
 - uses: ophub/amlogic-s9xxx-openwrt@main
   with:
-    openwrt_path: rootfs.tar.gz
-    openwrt_board: s905l3a
-    openwrt_kernel: 6.6.y-cm311bt
+    openwrt_path: artifacts/rootfs/*rootfs.tar.gz
+    openwrt_board: s905l3a-cm311
+    openwrt_kernel: 6.6.y
+    kernel_repo: ${{ github.repository }}
+    kernel_usage: stable
 ```
 
-3. 执行强制门禁（见第 5 节），全部通过才上传 Artifact 与 Release。
+门禁全部通过后才上传 Artifact 与 Release `firmware_25.12.2`。
 
-产物命名：`immortalwrt_25.12.2_s905l3a_cm311-1a_bt_<YYYYMMDD>.img.gz` + `sha256.txt`。
+产物命名由打包脚本生成（`*_s905l3a-cm311_*.img.gz` 等）。
 
 触发方式：`workflow_dispatch`（输入内核版本、是否复用缓存）+ `push tag`。
 
