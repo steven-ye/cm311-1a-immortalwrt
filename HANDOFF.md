@@ -24,6 +24,17 @@
 - 打包：`openwrt_board: s905l3a-cm311`、`kernel_repo: 本仓库`、`kernel_usage: stable`
 - 蓝牙：`btusb` + 内置 `rtl8761bu_fw.bin` / `rtl8761bu_config.bin`（从 Debian firmware-realtek 提取），bluez 开机自启
 
+## 蓝牙/DTS 备用文件（仅在出问题后使用）
+
+用户在旧固件上验证过的一对替换文件，已存入仓库 `fallback/`，**默认不参与构建**：
+
+| 文件 | 位置 | 用途 |
+| --- | --- | --- |
+| `meson-g12a-s905l3a-cm311.dtb` (79229 B) | `fallback/dtb/` | 首启异常（网口/存储/外设不对）时，替换镜像 `/boot/dtb/amlogic/meson-g12a-s905l3a-cm311.dtb` |
+| `rtl8761b_config.bin` (81 B) | `fallback/firmware/` | `hci0` 出现但初始化失败时，放到目标机 `/lib/firmware/rtl_bt/`（当前镜像内置的是 6 B 的 `rtl8761bu_config.bin`） |
+
+处理方式：出问题时把对应文件加进 `config/imagebuilder/files/...`（固件）或替换 dtb 后重打包，而不是手工改板上文件。
+
 ## 待验证（首个未知点）
 
 1. 打包动作是否接受 `kernel_repo` 指向非 ophub 的仓库（读取本仓库 `kernel_stable` Release）
