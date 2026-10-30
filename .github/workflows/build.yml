@@ -56,17 +56,37 @@ jobs:
 
       - name: 门禁：btusb.ko 必须存在
         run: |
-          mods="$(ls compile-kernel/output/modules-*.tar.gz | head -n 1)"
+          mods="$(find "${PACKAGED_OUTPUTPATH}" -name 'modules-*.tar.gz' | head -n 1)"
           echo "modules: ${mods}"
+          test -s "${mods}" || { echo "::error::未找到 modules 内核包"; exit 1; }
           tar -tzf "${mods}" | grep -q 'drivers/bluetooth/btusb.ko' \
             || { echo "::error::内核未编入 btusb.ko，蓝牙无法工作"; exit 1; }
+
+      - name: 规范化内核包名（打包阶段按 <version>.tar.gz 下载）
+        run: |
+          cd "${PACKAGED_OUTPUTPATH}"
+          ver="$(echo "${PACKAGED_OUTPUTTAGS}" | awk '{print $1}')"
+          echo "version: ${ver}"
+          if [[ ! -f "${ver}.tar.gz" ]]; then
+            src="$(ls -1 *.tar.gz | grep -v '^deb-' | grep "${ver}" | head -n 1)"
+            echo "repack: ${src} -> ${ver}.tar.gz"
+            rm -rf /tmp/kx && mkdir -p /tmp/kx
+            tar -mxzf "${src}" -C /tmp/kx
+            inner="$(ls /tmp/kx | head -n 1)"
+            if [[ "${inner}" != "${ver}" ]]; then
+              mv "/tmp/kx/${inner}" "/tmp/kx/${ver}"
+            fi
+            tar -czf "${ver}.tar.gz" -C /tmp/kx "${ver}"
+            rm -rf /tmp/kx
+          fi
+          ls -lh *.tar.gz
 
       - name: 发布内核到 Release
         if: env.PACKAGED_STATUS == 'success'
         uses: ophub/upload-to-releases@main
         with:
           tag: kernel_stable
-          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
+          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*.tar.gz
           allow_updates: true
           remove_artifacts: false
           replaces_artifacts: true
