@@ -4,13 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "内核系列"
+        description: "内核系列（仓库需存在对应的 kernel-config/config-*）"
         required: false
         default: "6.6.y"
-        type: choice
-        options:
-          - 6.6.y
-          - 6.1.y
       kernel_sign:
         description: "内核签名"
         required: false
@@ -38,12 +34,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 生成内核配置（ophub 模板 + 蓝牙 fragment）
+      - name: 校验内核配置（仓库内置 config-6.6）
         run: |
-          mkdir -p kernel-config
-          curl -fsSL "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-${KERNEL_SERIES}" \
-            -o "kernel-config/config-${KERNEL_SERIES}"
-          cat kernel-config/bt.fragment >> "kernel-config/config-${KERNEL_SERIES}"
+          test -s "kernel-config/config-${KERNEL_SERIES}" \
+            || { echo "::error::缺少 kernel-config/config-${KERNEL_SERIES}"; exit 1; }
+          grep -q 'CONFIG_BT_HCIBTUSB=m' "kernel-config/config-${KERNEL_SERIES}" \
+            || { echo "::error::内核配置缺少 CONFIG_BT_HCIBTUSB=m"; exit 1; }
           echo "蓝牙相关配置行数: $(grep -c 'CONFIG_BT' "kernel-config/config-${KERNEL_SERIES}")"
 
       - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
@@ -82,8 +78,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 下载 RTL8761B 固件
-        run: bash scripts/fetch-bt-firmware.sh
+      - name: 校验蓝牙固件（仓库内置）
+        run: |
+          ls -l config/imagebuilder/files/lib/firmware/rtl_bt/
+          test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761bu_fw.bin \
+            || { echo "::error::缺少 rtl8761bu_fw.bin"; exit 1; }
 
       - name: 构建 rootfs [ immortalwrt:${{ env.IMMORTALWRT_VERSION }} ]
         run: |

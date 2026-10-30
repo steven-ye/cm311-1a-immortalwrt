@@ -43,7 +43,7 @@ ImmortalWrt 25.12.2 官方 target 列表（`dl.wrt.moe/releases/25.12.2/targets/
     kernel_package: all
 ```
 
-构建前从 `ophub/kernel` 拉取 `config-6.6` 模板，追加 `kernel-config/bt.fragment`，再交给编译动作。
+构建前只做配置校验：仓库内置 `kernel-config/config-6.6`（ophub stable 模板 + `bt.fragment` 合并结果），避免运行时外网下载导致首跑失败。
 产物（`boot`/`modules`/`dtb`）发布到本仓库 Release `kernel_stable`，供打包 job 通过 `kernel_repo: <本仓库>` 读取。
 
 ### 3.2 rootfs job
