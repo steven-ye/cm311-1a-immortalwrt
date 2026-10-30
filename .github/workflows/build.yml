@@ -36,11 +36,13 @@ jobs:
 
       - name: 校验内核配置（仓库内置 config-6.6）
         run: |
-          test -s "kernel-config/config-${KERNEL_SERIES}" \
-            || { echo "::error::缺少 kernel-config/config-${KERNEL_SERIES}"; exit 1; }
-          grep -q 'CONFIG_BT_HCIBTUSB=m' "kernel-config/config-${KERNEL_SERIES}" \
+          CONFIG_FILE="kernel-config/config-${KERNEL_SERIES%.y}"
+          echo "config: ${CONFIG_FILE}"
+          test -s "${CONFIG_FILE}" \
+            || { echo "::error::缺少 ${CONFIG_FILE}"; exit 1; }
+          grep -q 'CONFIG_BT_HCIBTUSB=m' "${CONFIG_FILE}" \
             || { echo "::error::内核配置缺少 CONFIG_BT_HCIBTUSB=m"; exit 1; }
-          echo "蓝牙相关配置行数: $(grep -c 'CONFIG_BT' "kernel-config/config-${KERNEL_SERIES}")"
+          echo "蓝牙相关配置行数: $(grep -c 'CONFIG_BT' "${CONFIG_FILE}")"
 
       - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
         uses: ophub/amlogic-s9xxx-armbian@main
