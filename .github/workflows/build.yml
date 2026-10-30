@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "内核系列（仓库需存在对应的 kernel-config/config-*）"
+        description: "内核系列（image job 使用，如 6.6.y）"
         required: false
         default: "6.6.y"
-      kernel_sign:
-        description: "内核签名"
+      build_kernel:
+        description: "是否自编译内核（默认 false，直接使用 ophub/kernel 预编译包）"
         required: false
-        default: "-cm311bt"
+        default: "false"
   push:
     tags:
       - "v*"
@@ -24,12 +24,14 @@ env:
   BOARD: "s905l3a-cm311"
 
 jobs:
-  # 1. 自编译 S905L3A 内核（含蓝牙模块），产物发布到本仓库 kernel_stable Release
+  # 可选：自编译内核。仓库内 kernel-config/config-6.6 与 ophub stable 模板一致，
+  # 默认关闭，直接使用 ophub/kernel 的 kernel_stable 预编译包（已含 btusb.ko）。
   kernel:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_kernel == 'true' }}
     runs-on: ubuntu-26.04-arm
     env:
       KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
-      KERNEL_SIGN: ${{ inputs.kernel_sign || '-cm311bt' }}
+      KERNEL_SIGN: "-cm311bt"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,7 +44,6 @@ jobs:
             || { echo "::error::缺少 ${CONFIG_FILE}"; exit 1; }
           grep -q 'CONFIG_BT_HCIBTUSB=m' "${CONFIG_FILE}" \
             || { echo "::error::内核配置缺少 CONFIG_BT_HCIBTUSB=m"; exit 1; }
-          echo "蓝牙相关配置行数: $(grep -c 'CONFIG_BT' "${CONFIG_FILE}")"
 
       - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
         uses: ophub/amlogic-s9xxx-armbian@main
@@ -54,12 +55,27 @@ jobs:
           kernel_config: kernel-config
           kernel_package: all
 
+      # 新版编译动作只产出一个合并包 <ver><sign>.tar.gz，内部是
+      # <ver><sign>/{boot,dtb-*,modules}-*.tar.gz，因此要拆开检查 btusb.ko。
       - name: 门禁：btusb.ko 必须存在
         run: |
-          mods="$(find "${PACKAGED_OUTPUTPATH}" -name 'modules-*.tar.gz' | head -n 1)"
-          echo "modules: ${mods}"
-          test -s "${mods}" || { echo "::error::未找到 modules 内核包"; exit 1; }
-          tar -tzf "${mods}" | grep -q 'drivers/bluetooth/btusb.ko' \
+          outer="$(find "${PACKAGED_OUTPUTPATH}" -maxdepth 1 -name '*.tar.gz' | head -n 1)"
+          echo "outer: ${outer}"
+          test -s "${outer}" || { echo "::error::内核目录下没有 tar.gz 产物"; exit 1; }
+          listing="$(tar -tzf "${outer}")"
+          echo "${listing}" | head -n 20
+
+          work="$(mktemp -d)"
+          if echo "${listing}" | grep -q 'drivers/bluetooth/btusb.ko'; then
+            echo "btusb.ko 直接位于合并包内"
+            exit 0
+          fi
+
+          mods_name="$(echo "${listing}" | grep -E '(^|/)modules-[^/]*\.tar\.gz$' | head -n 1)"
+          echo "modules: ${mods_name}"
+          test -n "${mods_name}" || { echo "::error::合并包内未找到 modules 内核包"; exit 1; }
+          tar -xzf "${outer}" -C "${work}" "${mods_name}"
+          tar -tzf "${work}/${mods_name}" | grep -q 'drivers/bluetooth/btusb.ko' \
             || { echo "::error::内核未编入 btusb.ko，蓝牙无法工作"; exit 1; }
 
       - name: 规范化内核包名（打包阶段按 <version>.tar.gz 下载）
@@ -93,7 +109,7 @@ jobs:
           make_latest: false
           gh_token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 2. ImmortalWrt 25.12.2 armsr/armv8 rootfs（LuCI + bluez + 蓝牙固件）
+  # 1. ImmortalWrt 25.12.2 armsr/armv8 rootfs（LuCI + bluez + 蓝牙固件）
   rootfs:
     runs-on: ubuntu-26.04
     steps:
@@ -131,9 +147,9 @@ jobs:
           path: output/*rootfs.tar.gz
           retention-days: 7
 
-  # 3. 组合内核 + rootfs，打包 CM311-1a 可刷镜像
+  # 2. 组合内核 + rootfs，打包 CM311-1a 可刷镜像
   image:
-    needs: [kernel, rootfs]
+    needs: [rootfs]
     runs-on: ubuntu-26.04
     env:
       KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
@@ -154,7 +170,7 @@ jobs:
           openwrt_board: ${{ env.BOARD }}
           openwrt_kernel: ${{ env.KERNEL_SERIES }}
           auto_kernel: true
-          kernel_repo: ${{ github.repository }}
+          kernel_repo: ophub/kernel
           kernel_usage: stable
           builder_name: steven-ye
 
@@ -178,4 +194,5 @@ jobs:
             ### CM311-1a ImmortalWrt ${{ env.IMMORTALWRT_VERSION }}
             - 默认 IP: `192.168.1.1`，默认账号 `root`
             - 蓝牙: RTL8761B（btusb + rtl8761bu 固件，bluez 开机自启）
+            - 内核: ophub/kernel `kernel_stable` 预编译包（config 与仓库 kernel-config 一致）
             - 刷机: 先写 U 盘启动验证，再在「系统 → 晶晨宝盒」安装到 eMMC，设备选 `CM311-1a-YST`
