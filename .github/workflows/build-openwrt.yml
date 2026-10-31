@@ -4,17 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_version:
-        description: "OpenWrt 版本（latest=自动取最新稳定版，也可指定如 25.12.6）"
-        required: false
+        description: "OpenWrt 版本（latest=自动取最新稳定版；仅列 apk 版本的 25.12.x）"
+        type: choice
         default: "latest"
+        options:
+          - latest
+          - "25.12.6"
+          - "25.12.5"
+          - "25.12.4"
+          - "25.12.3"
+          - "25.12.2"
+          - "25.12.1"
+          - "25.12.0"
       kernel_version:
         description: "内核系列（image job 使用，如 6.6.y）"
         required: false
         default: "6.6.y"
       build_kernel:
         description: "是否自编译内核（默认 false，直接使用 ophub/kernel 预编译包）"
-        required: false
+        type: choice
         default: "false"
+        options:
+          - "false"
+          - "true"
   push:
     tags:
       - "openwrt-v*"
