@@ -210,6 +210,13 @@ jobs:
           tar -czf "work/${top}/${dtbpkg}" -C /tmp/dt "${dtop}"
           rm -rf /tmp/dt
 
+          # 内核包内自带 sha256sums 清单，改动 dtb 后必须重算，否则打包时会校验失败
+          if [ -f "work/${top}/sha256sums" ]; then
+            ( cd "work/${top}" && sha256sum $(awk '{print $2}' sha256sums) > sha256sums )
+            echo "sha256sums 已重算:"
+            cat "work/${top}/sha256sums"
+          fi
+
           tar -czf "${ver}.tar.gz" -C work "${top}"
           rm -rf work "kernel-${ver}.tar.gz"
           ls -lh "${ver}.tar.gz"
