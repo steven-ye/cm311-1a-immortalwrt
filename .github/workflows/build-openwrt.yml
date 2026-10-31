@@ -1,8 +1,12 @@
-name: Build CM311-1a OpenWrt 25.12.2
+name: Build CM311-1a OpenWrt
 
 on:
   workflow_dispatch:
     inputs:
+      openwrt_version:
+        description: "OpenWrt 版本（latest=自动取最新稳定版，也可指定如 25.12.6）"
+        required: false
+        default: "latest"
       kernel_version:
         description: "内核系列（image job 使用，如 6.6.y）"
         required: false
@@ -20,10 +24,35 @@ permissions:
 
 env:
   TZ: Etc/UTC
-  OPENWRT_VERSION: "25.12.2"
   BOARD: "s905l3a-cm311"
 
 jobs:
+  # 解析要构建的 OpenWrt 版本：手动指定或 latest → 最新稳定版（排除 -rc）
+  prepare:
+    runs-on: ubuntu-26.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      kmods: ${{ steps.resolve.outputs.kmods }}
+    steps:
+      - name: 解析版本与 kmods ABI
+        id: resolve
+        run: |
+          want="${{ inputs.openwrt_version }}"
+          [ -n "${want}" ] || want="latest"
+          if [ "${want}" = "latest" ]; then
+            want="$(curl -fsSL https://downloads.openwrt.org/releases/ \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+/' | tr -d '/' | sort -V | tail -n1)"
+          fi
+          echo "version: ${want}"
+          curl -fsSL "https://mirrors.ustc.edu.cn/openwrt/releases/${want}/targets/armsr/armv8/packages/packages.adb" -o /dev/null \
+            || { echo "::error::USTC 镜像缺少 OpenWrt ${want} (armsr/armv8)"; exit 1; }
+          k="$(curl -fsSL "https://mirrors.ustc.edu.cn/openwrt/releases/${want}/targets/armsr/armv8/kmods/" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-1-[0-9a-f]{32,40}' | sort -u | tail -n1)"
+          [ -n "${k}" ] || { echo "::error::未取到 ${want} 的 kmods ABI 目录"; exit 1; }
+          echo "kmods: ${k}"
+          echo "version=${want}" >> "${GITHUB_OUTPUT}"
+          echo "kmods=${k}" >> "${GITHUB_OUTPUT}"
+
   # 可选：自编译内核。仓库内 kernel-config/config-6.6 与 ophub stable 模板一致，
   # 默认关闭，直接使用 ophub/kernel 的 kernel_stable 预编译包（已含 btusb.ko）。
   kernel:
@@ -135,9 +164,13 @@ jobs:
           make_latest: false
           gh_token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 1. OpenWrt 25.12.2 armsr/armv8 rootfs（LuCI + bluez + 蓝牙固件）
+  # 1. OpenWrt ${版本由 prepare 解析} armsr/armv8 rootfs（LuCI + bluez + 蓝牙固件）
   rootfs:
+    needs: prepare
     runs-on: ubuntu-26.04
+    env:
+      OPENWRT_VERSION: ${{ needs.prepare.outputs.version }}
+      KMODS_ABI: ${{ needs.prepare.outputs.kmods }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -150,17 +183,20 @@ jobs:
           test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761b_config.bin \
             || { echo "::error::缺少 rtl8761b_config.bin"; exit 1; }
 
-      - name: 刷新 USTC 源的 kmods 目录（内核 ABI 哈希会随 release 重建变化）
+      - name: 生成 USTC apk 源（版本与 kmods ABI 由 prepare 解析）
         run: |
-          f=config/imagebuilder/files-openwrt/etc/apk/repositories.d/distfeeds.list
-          d="$(curl -fsSL "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/targets/armsr/armv8/kmods/" \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-1-[0-9a-f]{40}' | sort -u | tail -n1)" || true
-          if [ -n "${d}" ]; then
-            sed -i -E "s#kmods/[^/]+/packages.adb#kmods/${d}/packages.adb#" "${f}"
-            echo "kmods dir: ${d}"
-          else
-            echo "::warning::未能读取镜像站 kmods 目录，沿用仓库内配置"
-          fi
+          f=config/imagebuilder/files/etc/apk/repositories.d/distfeeds.list
+          mkdir -p "$(dirname "${f}")"
+          {
+            echo "# OpenWrt ${OPENWRT_VERSION} (armsr/armv8) —— USTC 镜像"
+            echo "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/targets/armsr/armv8/packages/packages.adb"
+            echo "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/packages/aarch64_generic/base/packages.adb"
+            echo "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/targets/armsr/armv8/kmods/${KMODS_ABI}/packages.adb"
+            echo "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/packages/aarch64_generic/luci/packages.adb"
+            echo "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/packages/aarch64_generic/packages/packages.adb"
+            echo "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/packages/aarch64_generic/routing/packages.adb"
+            echo "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/packages/aarch64_generic/telephony/packages.adb"
+          } > "${f}"
           cat "${f}"
 
       - name: 构建 rootfs [ openwrt:${{ env.OPENWRT_VERSION }} ]
@@ -170,8 +206,6 @@ jobs:
           chmod +x config/imagebuilder/files/etc/init.d/* \
                    config/imagebuilder/files/etc/uci-defaults/* 2>/dev/null || true
           cp config/imagebuilder/config-openwrt config/imagebuilder/config
-          cp config/imagebuilder/files-openwrt/etc/apk/repositories.d/distfeeds.list \
-             config/imagebuilder/files/etc/apk/repositories.d/distfeeds.list
           ./config/imagebuilder/imagebuilder.sh "openwrt:${OPENWRT_VERSION}"
 
       - name: 门禁：固件与 bluez 必须存在
@@ -316,10 +350,11 @@ jobs:
 
   # 2. 组合内核 + rootfs，打包 CM311-1a 可刷镜像
   image:
-    needs: [rootfs, kernel_dtb]
+    needs: [prepare, rootfs, kernel_dtb]
     runs-on: ubuntu-26.04
     env:
       KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
+      OPENWRT_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

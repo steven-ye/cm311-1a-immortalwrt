@@ -1,9 +1,0 @@
-# OpenWrt 25.12.2 (armsr/armv8) —— USTC 镜像
-# 注意：kmods 目录名带内核 ABI 哈希，CI 会在构建前按镜像站实际目录刷新这一行
-https://mirrors.ustc.edu.cn/openwrt/releases/25.12.2/targets/armsr/armv8/packages/packages.adb
-https://mirrors.ustc.edu.cn/openwrt/releases/25.12.2/packages/aarch64_generic/base/packages.adb
-https://mirrors.ustc.edu.cn/openwrt/releases/25.12.2/targets/armsr/armv8/kmods/6.12.74-1-b7d265defb2f518d9a2908a59aa22d7f/packages.adb
-https://mirrors.ustc.edu.cn/openwrt/releases/25.12.2/packages/aarch64_generic/luci/packages.adb
-https://mirrors.ustc.edu.cn/openwrt/releases/25.12.2/packages/aarch64_generic/packages/packages.adb
-https://mirrors.ustc.edu.cn/openwrt/releases/25.12.2/packages/aarch64_generic/routing/packages.adb
-https://mirrors.ustc.edu.cn/openwrt/releases/25.12.2/packages/aarch64_generic/telephony/packages.adb

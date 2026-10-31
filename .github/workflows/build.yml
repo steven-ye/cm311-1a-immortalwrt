@@ -154,7 +154,7 @@ jobs:
         run: |
           f=config/imagebuilder/files/etc/apk/repositories.d/distfeeds.list
           d="$(curl -fsSL "https://mirrors.ustc.edu.cn/immortalwrt/releases/${IMMORTALWRT_VERSION}/targets/armsr/armv8/kmods/" \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-1-[0-9a-f]{40}' | sort -u | tail -n1)" || true
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-1-[0-9a-f]{32,40}' | sort -u | tail -n1)" || true
           if [ -n "${d}" ]; then
             sed -i -E "s#kmods/[^/]+/packages.adb#kmods/${d}/packages.adb#" "${f}"
             echo "kmods dir: ${d}"
