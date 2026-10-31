@@ -1,0 +1,367 @@
+name: Build CM311-1a OpenWrt 25.12.2
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "内核系列（image job 使用，如 6.6.y）"
+        required: false
+        default: "6.6.y"
+      build_kernel:
+        description: "是否自编译内核（默认 false，直接使用 ophub/kernel 预编译包）"
+        required: false
+        default: "false"
+  push:
+    tags:
+      - "openwrt-v*"
+
+permissions:
+  contents: write
+
+env:
+  TZ: Etc/UTC
+  OPENWRT_VERSION: "25.12.2"
+  BOARD: "s905l3a-cm311"
+
+jobs:
+  # 可选：自编译内核。仓库内 kernel-config/config-6.6 与 ophub stable 模板一致，
+  # 默认关闭，直接使用 ophub/kernel 的 kernel_stable 预编译包（已含 btusb.ko）。
+  kernel:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_kernel == 'true' }}
+    runs-on: ubuntu-26.04-arm
+    env:
+      KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
+      KERNEL_SIGN: "-cm311bt"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 校验内核配置（仓库内置 config-6.6）
+        run: |
+          CONFIG_FILE="kernel-config/config-${KERNEL_SERIES%.y}"
+          echo "config: ${CONFIG_FILE}"
+          test -s "${CONFIG_FILE}" \
+            || { echo "::error::缺少 ${CONFIG_FILE}"; exit 1; }
+          grep -q 'CONFIG_BT_HCIUART=m' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_BT_HCIUART=m"; exit 1; }
+          grep -q 'CONFIG_BT_HCIUART_3WIRE=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_BT_HCIUART_3WIRE=y（RTL8761B UART 需要 H5）"; exit 1; }
+          grep -q 'CONFIG_BT_HCIUART_RTL=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_BT_HCIUART_RTL=y"; exit 1; }
+          grep -q 'CONFIG_SERIAL_DEV_BUS=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_SERIAL_DEV_BUS=y（serdev 绑定需要）"; exit 1; }
+
+      - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
+        uses: ophub/amlogic-s9xxx-armbian@main
+        with:
+          build_target: kernel
+          kernel_source: unifreq
+          kernel_version: ${{ env.KERNEL_SERIES }}
+          kernel_sign: ${{ env.KERNEL_SIGN }}
+          kernel_config: kernel-config
+          kernel_package: all
+
+      # 新版动作只产出一个合并包 <ver><sign>.tar.gz，内部是
+      # <ver><sign>/{boot,dtb-*,modules}-*.tar.gz。
+      # 蓝牙走 UART(hci_uart + btrtl)，并替换成带蓝牙节点、旧固件验证过的 cm311 dtb。
+      - name: 校验蓝牙模块 + 替换 CM311 dtb
+        run: |
+          outer="$(find "${PACKAGED_OUTPUTPATH}" -maxdepth 1 -name '*.tar.gz' | head -n 1)"
+          echo "outer: ${outer}"
+          test -s "${outer}" || { echo "::error::内核目录下没有 tar.gz 产物"; exit 1; }
+          src="${GITHUB_WORKSPACE}/fallback/dtb/meson-g12a-s905l3a-cm311.dtb"
+          test -s "${src}" || { echo "::error::仓库缺少 fallback dtb"; exit 1; }
+
+          work="$(mktemp -d)"
+          tar -mxzf "${outer}" -C "${work}"
+          top="$(ls "${work}" | head -n 1)"
+          echo "top: ${top}"
+
+          mods="$(ls "${work}/${top}" | grep -E '^modules-.*\.tar\.gz$' | head -n 1)"
+          echo "modules: ${mods}"
+          test -n "${mods}" || { echo "::error::合并包内未找到 modules 内核包"; exit 1; }
+          tar -tzf "${work}/${top}/${mods}" | grep -qE 'bluetooth/(hci_uart|btrtl)/?.*\.ko' \
+            || { echo "::error::内核未编入 hci_uart/btrtl，UART 蓝牙无法工作"; exit 1; }
+          tar -tzf "${work}/${top}/${mods}" | grep -q 'uhid\.ko' \
+            || { echo "::error::内核未编入 uhid.ko，蓝牙遥控输入无法工作"; exit 1; }
+          tar -tzf "${work}/${top}/${mods}" | grep -q 'hidp\.ko' \
+            || { echo "::error::内核未编入 hidp.ko，蓝牙遥控 HIDP 无法工作"; exit 1; }
+
+          dtbpkg="$(ls "${work}/${top}" | grep -E '^dtb-amlogic-.*\.tar\.gz$' | head -n 1)"
+          echo "dtb pkg: ${dtbpkg}"
+          test -n "${dtbpkg}" || { echo "::error::合并包内未找到 dtb-amlogic"; exit 1; }
+          rm -rf /tmp/dt && mkdir -p /tmp/dt
+          tar -xzf "${work}/${top}/${dtbpkg}" -C /tmp/dt
+          target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
+          test -n "${target}" || { echo "::error::dtb 包内未找到 cm311 dtb"; exit 1; }
+          cp -f "${src}" "${target}"
+          dtop="$(ls /tmp/dt | head -n 1)"
+          tar -czf "${work}/${top}/${dtbpkg}" -C /tmp/dt "${dtop}"
+          rm -rf /tmp/dt
+          echo "patched dtb: ${target}"
+
+          tar -czf "${outer}" -C "${work}" "${top}"
+          rm -rf "${work}"
+          ls -lh "${outer}"
+
+      - name: 规范化内核包名（打包阶段按 <version>.tar.gz 下载）
+        run: |
+          cd "${PACKAGED_OUTPUTPATH}"
+          ver="$(echo "${PACKAGED_OUTPUTTAGS}" | awk '{print $1}')"
+          echo "version: ${ver}"
+          if [[ ! -f "${ver}.tar.gz" ]]; then
+            src="$(ls -1 *.tar.gz | grep -v '^deb-' | grep "${ver}" | head -n 1)"
+            echo "repack: ${src} -> ${ver}.tar.gz"
+            rm -rf /tmp/kx && mkdir -p /tmp/kx
+            tar -mxzf "${src}" -C /tmp/kx
+            inner="$(ls /tmp/kx | head -n 1)"
+            if [[ "${inner}" != "${ver}" ]]; then
+              mv "/tmp/kx/${inner}" "/tmp/kx/${ver}"
+            fi
+            tar -czf "${ver}.tar.gz" -C /tmp/kx "${ver}"
+            rm -rf /tmp/kx
+          fi
+          ls -lh *.tar.gz
+
+      - name: 发布内核到 Release
+        if: env.PACKAGED_STATUS == 'success'
+        uses: ophub/upload-to-releases@main
+        with:
+          tag: kernel_stable
+          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*.tar.gz
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: false
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 1. OpenWrt 25.12.2 armsr/armv8 rootfs（LuCI + bluez + 蓝牙固件）
+  rootfs:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 校验蓝牙固件（仓库内置）
+        run: |
+          ls -l config/imagebuilder/files/lib/firmware/rtl_bt/
+          test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761b_fw.bin \
+            || { echo "::error::缺少 rtl8761b_fw.bin"; exit 1; }
+          test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761b_config.bin \
+            || { echo "::error::缺少 rtl8761b_config.bin"; exit 1; }
+
+      - name: 刷新 USTC 源的 kmods 目录（内核 ABI 哈希会随 release 重建变化）
+        run: |
+          f=config/imagebuilder/files-openwrt/etc/apk/repositories.d/distfeeds.list
+          d="$(curl -fsSL "https://mirrors.ustc.edu.cn/openwrt/releases/${OPENWRT_VERSION}/targets/armsr/armv8/kmods/" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-1-[0-9a-f]{40}' | sort -u | tail -n1)" || true
+          if [ -n "${d}" ]; then
+            sed -i -E "s#kmods/[^/]+/packages.adb#kmods/${d}/packages.adb#" "${f}"
+            echo "kmods dir: ${d}"
+          else
+            echo "::warning::未能读取镜像站 kmods 目录，沿用仓库内配置"
+          fi
+          cat "${f}"
+
+      - name: 构建 rootfs [ openwrt:${{ env.OPENWRT_VERSION }} ]
+        run: |
+          chmod +x config/imagebuilder/imagebuilder.sh
+          # 覆盖层里的脚本在 Windows 上编辑，推送后可能丢失可执行位，这里是唯一可靠的兜底
+          chmod +x config/imagebuilder/files/etc/init.d/* \
+                   config/imagebuilder/files/etc/uci-defaults/* 2>/dev/null || true
+          cp config/imagebuilder/config-openwrt config/imagebuilder/config
+          cp config/imagebuilder/files-openwrt/etc/apk/repositories.d/distfeeds.list \
+             config/imagebuilder/files/etc/apk/repositories.d/distfeeds.list
+          ./config/imagebuilder/imagebuilder.sh "openwrt:${OPENWRT_VERSION}"
+
+      - name: 门禁：固件与 bluez 必须存在
+        run: |
+          rootfs="$(ls output/*rootfs.tar.gz | head -n 1)"
+          echo "rootfs: ${rootfs}"
+          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761b_fw.bin' \
+            || { echo "::error::缺少 rtl8761b_fw.bin"; exit 1; }
+          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761b_config.bin' \
+            || { echo "::error::缺少 rtl8761b_config.bin"; exit 1; }
+          tar -tzf "${rootfs}" | grep -Eq '(sbin|bin)/bluetoothctl' \
+            || { echo "::error::缺少 bluetoothctl"; exit 1; }
+          for f in \
+            etc/uci-defaults/99-bluetooth \
+            etc/uci-defaults/99-audio-bt \
+            etc/modules.d/60-uhid \
+            etc/init.d/av-mixer \
+            etc/init.d/pulseaudio \
+            etc/asound.conf \
+            etc/mpd.conf \
+            etc/pulse/system.pa \
+            etc/dbus-1/system.d/bluetooth.conf \
+            usr/share/dbus-1/system.d/pulseaudio-system.conf \
+            etc/apk/repositories.d/distfeeds.list \
+            etc/uci-defaults/99-apk-kernel-sync \
+            usr/bin/pulseaudio \
+            usr/bin/mpd \
+            usr/lib/pulseaudio/modules/module-bluez5-discover.so; do
+            tar -tzf "${rootfs}" | grep -q "$f" \
+              || { echo "::error::缺少 ${f}"; exit 1; }
+          done
+          # D-Bus 策略必须允许 bluetoothd 与 PulseAudio 互发方法调用，否则 A2DP 无法建立
+          tar -xzOf "${rootfs}" "$(tar -tzf "${rootfs}" | grep -m1 'etc/dbus-1/system.d/bluetooth.conf')" \
+            | grep -q 'send_type="method_call"' \
+            || { echo "::error::bluetooth.conf 未允许 method_call"; exit 1; }
+          tar -xzOf "${rootfs}" "$(tar -tzf "${rootfs}" | grep -m1 'usr/share/dbus-1/system.d/pulseaudio-system.conf')" \
+            | grep -q 'send_type="method_call"' \
+            || { echo "::error::pulseaudio-system.conf 未允许 method_call"; exit 1; }
+          # apk 源必须指向 USTC 镜像，否则新固件仍会从官方源拉包
+          tar -xzOf "${rootfs}" "$(tar -tzf "${rootfs}" | grep -m1 'etc/apk/repositories.d/distfeeds.list')" \
+            | grep -q 'mirrors.ustc.edu.cn/openwrt/releases/' \
+            || { echo "::error::distfeeds.list 未指向 USTC 镜像"; exit 1; }
+          # 板端现有 App 必须全部进固件
+          for b in \
+            usr/bin/docker usr/bin/python3 usr/bin/php8-cli \
+            usr/sbin/nginx usr/sbin/mosquitto usr/bin/ttyd \
+            usr/bin/upmpdcli usr/bin/mpc usr/bin/nano usr/bin/git \
+            usr/bin/frpc usr/bin/socat usr/sbin/smartctl \
+            usr/sbin/ksmbd.mountd usr/lib/acme/client/acme.sh; do
+            tar -tzf "${rootfs}" | grep -q "${b}" \
+              || { echo "::error::缺少 ${b}"; exit 1; }
+          done
+          # LuCI 应用（板端已安装，必须随固件提供）
+          for a in \
+            luci-app-acme luci-app-ddns luci-app-dockerman luci-app-firewall \
+            luci-app-frpc luci-app-ksmbd luci-app-mosquitto \
+            luci-app-package-manager luci-app-ttyd; do
+            tar -tzf "${rootfs}" | grep -q "usr/share/rpcd/acl.d/${a}.json" \
+              || { echo "::error::缺少 ${a}"; exit 1; }
+          done
+
+      - name: 上传 rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs
+          path: output/*rootfs.tar.gz
+          retention-days: 7
+
+  # 1.5 取 ophub 预编译内核，替换成带 UART 蓝牙节点的 CM311 dtb，再发到本仓库 kernel_stable
+  # （打包动作会把内核内的 dtb 解压到 /boot/dtb/amlogic，覆盖自定义文件，所以只能改内核包）
+  kernel_dtb:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 下载内核并替换 dtb
+        run: |
+          set -e
+          ver="$(curl -sL "https://api.github.com/repos/ophub/kernel/releases/tags/kernel_stable" \
+            | grep -oE '"name":\s*"6\.6\.[0-9]+\.tar\.gz"' \
+            | sed -E 's/.*"([0-9.]+)\.tar\.gz".*/\1/' | sort -V | tail -n1)"
+          test -n "${ver}" || { echo "::error::未找到 6.6 内核包"; exit 1; }
+          echo "KVER=${ver}" >> "${GITHUB_ENV}"
+          echo "kernel version: ${ver}"
+          curl -fL --retry 3 -o "kernel-${ver}.tar.gz" \
+            "https://github.com/ophub/kernel/releases/download/kernel_stable/${ver}.tar.gz"
+
+          src="${GITHUB_WORKSPACE}/fallback/dtb/meson-g12a-s905l3a-cm311.dtb"
+          test -s "${src}" || { echo "::error::仓库缺少 fallback dtb"; exit 1; }
+
+          rm -rf work && mkdir work
+          tar -mxzf "kernel-${ver}.tar.gz" -C work
+          top="$(ls work | head -n 1)"
+          dtbpkg="$(ls "work/${top}" | grep -E '^dtb-amlogic-.*\.tar\.gz$' | head -n 1)"
+          echo "dtb pkg: ${dtbpkg}"
+          test -n "${dtbpkg}" || { echo "::error::内核包内未找到 dtb-amlogic"; exit 1; }
+
+          rm -rf /tmp/dt && mkdir -p /tmp/dt
+          tar -xzf "work/${top}/${dtbpkg}" -C /tmp/dt
+          target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
+          test -n "${target}" || { echo "::error::dtb 包内未找到 cm311 dtb"; exit 1; }
+          cp -f "${src}" "${target}"
+          dtop="$(ls /tmp/dt | head -n 1)"
+          tar -czf "work/${top}/${dtbpkg}" -C /tmp/dt "${dtop}"
+          rm -rf /tmp/dt
+
+          # 内核包内自带 sha256sums 清单，改动 dtb 后必须重算，否则打包时会校验失败
+          if [ -f "work/${top}/sha256sums" ]; then
+            ( cd "work/${top}" && sha256sum $(awk '{print $2}' sha256sums) > sha256sums )
+            echo "sha256sums 已重算:"
+            cat "work/${top}/sha256sums"
+          fi
+
+          tar -czf "${ver}.tar.gz" -C work "${top}"
+          rm -rf work "kernel-${ver}.tar.gz"
+          ls -lh "${ver}.tar.gz"
+
+      - name: 创建 kernel_stable Release（已存在则跳过）
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/kernel_stable")"
+          if [ "${code}" = "404" ]; then
+            curl -s -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases" \
+              -d '{"tag_name":"kernel_stable","name":"kernel_stable","body":"ophub prebuilt kernel with CM311 UART bluetooth dtb"}'
+          fi
+
+      - name: 上传内核包到 Release
+        uses: ophub/upload-to-releases@main
+        with:
+          tag: kernel_stable
+          artifacts: ${{ github.workspace }}/${{ env.KVER }}.tar.gz
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: false
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. 组合内核 + rootfs，打包 CM311-1a 可刷镜像
+  image:
+    needs: [rootfs, kernel_dtb]
+    runs-on: ubuntu-26.04
+    env:
+      KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 下载 rootfs
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs
+          path: artifacts/rootfs
+
+      - name: 打包镜像 [ ${{ env.BOARD }} ]
+        uses: ophub/amlogic-s9xxx-openwrt@main
+        with:
+          openwrt_path: artifacts/rootfs/*rootfs.tar.gz
+          openwrt_board: ${{ env.BOARD }}
+          openwrt_kernel: ${{ env.KERNEL_SERIES }}
+          auto_kernel: true
+          kernel_repo: ${{ github.repository }}
+          kernel_usage: stable
+          builder_name: steven-ye
+
+      - name: 门禁：镜像产物存在
+        run: |
+          ls -lh ${PACKAGED_OUTPUTPATH}
+          test -n "$(ls ${PACKAGED_OUTPUTPATH}/*.img.gz)"
+
+      - name: 上传镜像到 Release
+        if: env.PACKAGED_STATUS == 'success'
+        uses: ophub/upload-to-releases@main
+        with:
+          tag: firmware_openwrt_${{ env.OPENWRT_VERSION }}
+          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: true
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ### CM311-1a OpenWrt ${{ env.OPENWRT_VERSION }}
+            - 用户空间来自 OpenWrt 官方 25.12.2 (armsr/armv8)
+            - ImmortalWrt 专属包（autocore/default-settings-chn/luci-app-diskman/automount/ntfs3-mount）官方源不存在，未包含
+            - 默认 IP: `192.168.1.1`，默认账号 `root`
+            - 蓝牙: RTL8761B（UART 接口，hci_uart + btrtl，bluez 开机自启）
+            - 内核: ophub 预编译包 + 已替换的 CM311 蓝牙 dtb（本仓库 kernel_stable）
+            - 刷机: 先写 U 盘启动验证，再在「系统 → 晶晨宝盒」安装到 eMMC，设备选 `CM311-1a-YST`
