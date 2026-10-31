@@ -42,8 +42,14 @@ jobs:
           echo "config: ${CONFIG_FILE}"
           test -s "${CONFIG_FILE}" \
             || { echo "::error::缺少 ${CONFIG_FILE}"; exit 1; }
-          grep -q 'CONFIG_BT_HCIBTUSB=m' "${CONFIG_FILE}" \
-            || { echo "::error::内核配置缺少 CONFIG_BT_HCIBTUSB=m"; exit 1; }
+          grep -q 'CONFIG_BT_HCIUART=m' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_BT_HCIUART=m"; exit 1; }
+          grep -q 'CONFIG_BT_HCIUART_3WIRE=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_BT_HCIUART_3WIRE=y（RTL8761B UART 需要 H5）"; exit 1; }
+          grep -q 'CONFIG_BT_HCIUART_RTL=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_BT_HCIUART_RTL=y"; exit 1; }
+          grep -q 'CONFIG_SERIAL_DEV_BUS=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_SERIAL_DEV_BUS=y（serdev 绑定需要）"; exit 1; }
 
       - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
         uses: ophub/amlogic-s9xxx-armbian@main
@@ -55,28 +61,44 @@ jobs:
           kernel_config: kernel-config
           kernel_package: all
 
-      # 新版编译动作只产出一个合并包 <ver><sign>.tar.gz，内部是
-      # <ver><sign>/{boot,dtb-*,modules}-*.tar.gz，因此要拆开检查 btusb.ko。
-      - name: 门禁：btusb.ko 必须存在
+      # 新版动作只产出一个合并包 <ver><sign>.tar.gz，内部是
+      # <ver><sign>/{boot,dtb-*,modules}-*.tar.gz。
+      # 蓝牙走 UART(hci_uart + btrtl)，并替换成带蓝牙节点、旧固件验证过的 cm311 dtb。
+      - name: 校验蓝牙模块 + 替换 CM311 dtb
         run: |
           outer="$(find "${PACKAGED_OUTPUTPATH}" -maxdepth 1 -name '*.tar.gz' | head -n 1)"
           echo "outer: ${outer}"
           test -s "${outer}" || { echo "::error::内核目录下没有 tar.gz 产物"; exit 1; }
-          listing="$(tar -tzf "${outer}")"
-          echo "${listing}" | head -n 20
+          src="${GITHUB_WORKSPACE}/fallback/dtb/meson-g12a-s905l3a-cm311.dtb"
+          test -s "${src}" || { echo "::error::仓库缺少 fallback dtb"; exit 1; }
 
           work="$(mktemp -d)"
-          if echo "${listing}" | grep -q 'drivers/bluetooth/btusb.ko'; then
-            echo "btusb.ko 直接位于合并包内"
-            exit 0
-          fi
+          tar -mxzf "${outer}" -C "${work}"
+          top="$(ls "${work}" | head -n 1)"
+          echo "top: ${top}"
 
-          mods_name="$(echo "${listing}" | grep -E '(^|/)modules-[^/]*\.tar\.gz$' | head -n 1)"
-          echo "modules: ${mods_name}"
-          test -n "${mods_name}" || { echo "::error::合并包内未找到 modules 内核包"; exit 1; }
-          tar -xzf "${outer}" -C "${work}" "${mods_name}"
-          tar -tzf "${work}/${mods_name}" | grep -q 'drivers/bluetooth/btusb.ko' \
-            || { echo "::error::内核未编入 btusb.ko，蓝牙无法工作"; exit 1; }
+          mods="$(ls "${work}/${top}" | grep -E '^modules-.*\.tar\.gz$' | head -n 1)"
+          echo "modules: ${mods}"
+          test -n "${mods}" || { echo "::error::合并包内未找到 modules 内核包"; exit 1; }
+          tar -tzf "${work}/${top}/${mods}" | grep -qE 'bluetooth/(hci_uart|btrtl)/?.*\.ko' \
+            || { echo "::error::内核未编入 hci_uart/btrtl，UART 蓝牙无法工作"; exit 1; }
+
+          dtbpkg="$(ls "${work}/${top}" | grep -E '^dtb-amlogic-.*\.tar\.gz$' | head -n 1)"
+          echo "dtb pkg: ${dtbpkg}"
+          test -n "${dtbpkg}" || { echo "::error::合并包内未找到 dtb-amlogic"; exit 1; }
+          rm -rf /tmp/dt && mkdir -p /tmp/dt
+          tar -xzf "${work}/${top}/${dtbpkg}" -C /tmp/dt
+          target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
+          test -n "${target}" || { echo "::error::dtb 包内未找到 cm311 dtb"; exit 1; }
+          cp -f "${src}" "${target}"
+          dtop="$(ls /tmp/dt | head -n 1)"
+          tar -czf "${work}/${top}/${dtbpkg}" -C /tmp/dt "${dtop}"
+          rm -rf /tmp/dt
+          echo "patched dtb: ${target}"
+
+          tar -czf "${outer}" -C "${work}" "${top}"
+          rm -rf "${work}"
+          ls -lh "${outer}"
 
       - name: 规范化内核包名（打包阶段按 <version>.tar.gz 下载）
         run: |
@@ -119,8 +141,10 @@ jobs:
       - name: 校验蓝牙固件（仓库内置）
         run: |
           ls -l config/imagebuilder/files/lib/firmware/rtl_bt/
-          test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761bu_fw.bin \
-            || { echo "::error::缺少 rtl8761bu_fw.bin"; exit 1; }
+          test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761b_fw.bin \
+            || { echo "::error::缺少 rtl8761b_fw.bin"; exit 1; }
+          test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761b_config.bin \
+            || { echo "::error::缺少 rtl8761b_config.bin"; exit 1; }
 
       - name: 构建 rootfs [ immortalwrt:${{ env.IMMORTALWRT_VERSION }} ]
         run: |
@@ -131,10 +155,10 @@ jobs:
         run: |
           rootfs="$(ls output/*rootfs.tar.gz | head -n 1)"
           echo "rootfs: ${rootfs}"
-          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761bu_fw.bin' \
-            || { echo "::error::缺少 rtl8761bu_fw.bin"; exit 1; }
-          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761bu_config.bin' \
-            || { echo "::error::缺少 rtl8761bu_config.bin"; exit 1; }
+          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761b_fw.bin' \
+            || { echo "::error::缺少 rtl8761b_fw.bin"; exit 1; }
+          tar -tzf "${rootfs}" | grep -q 'lib/firmware/rtl_bt/rtl8761b_config.bin' \
+            || { echo "::error::缺少 rtl8761b_config.bin"; exit 1; }
           tar -tzf "${rootfs}" | grep -Eq '(sbin|bin)/bluetoothctl' \
             || { echo "::error::缺少 bluetoothctl"; exit 1; }
           tar -tzf "${rootfs}" | grep -q 'etc/uci-defaults/99-bluetooth' \
@@ -147,9 +171,76 @@ jobs:
           path: output/*rootfs.tar.gz
           retention-days: 7
 
+  # 1.5 取 ophub 预编译内核，替换成带 UART 蓝牙节点的 CM311 dtb，再发到本仓库 kernel_stable
+  # （打包动作会把内核内的 dtb 解压到 /boot/dtb/amlogic，覆盖自定义文件，所以只能改内核包）
+  kernel_dtb:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 下载内核并替换 dtb
+        run: |
+          set -e
+          ver="$(curl -sL "https://api.github.com/repos/ophub/kernel/releases/tags/kernel_stable" \
+            | grep -oE '"name":\s*"6\.6\.[0-9]+\.tar\.gz"' \
+            | sed -E 's/.*"([0-9.]+)\.tar\.gz".*/\1/' | sort -V | tail -n1)"
+          test -n "${ver}" || { echo "::error::未找到 6.6 内核包"; exit 1; }
+          echo "KVER=${ver}" >> "${GITHUB_ENV}"
+          echo "kernel version: ${ver}"
+          curl -fL --retry 3 -o "kernel-${ver}.tar.gz" \
+            "https://github.com/ophub/kernel/releases/download/kernel_stable/${ver}.tar.gz"
+
+          src="${GITHUB_WORKSPACE}/fallback/dtb/meson-g12a-s905l3a-cm311.dtb"
+          test -s "${src}" || { echo "::error::仓库缺少 fallback dtb"; exit 1; }
+
+          rm -rf work && mkdir work
+          tar -mxzf "kernel-${ver}.tar.gz" -C work
+          top="$(ls work | head -n 1)"
+          dtbpkg="$(ls "work/${top}" | grep -E '^dtb-amlogic-.*\.tar\.gz$' | head -n 1)"
+          echo "dtb pkg: ${dtbpkg}"
+          test -n "${dtbpkg}" || { echo "::error::内核包内未找到 dtb-amlogic"; exit 1; }
+
+          rm -rf /tmp/dt && mkdir -p /tmp/dt
+          tar -xzf "work/${top}/${dtbpkg}" -C /tmp/dt
+          target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
+          test -n "${target}" || { echo "::error::dtb 包内未找到 cm311 dtb"; exit 1; }
+          cp -f "${src}" "${target}"
+          dtop="$(ls /tmp/dt | head -n 1)"
+          tar -czf "work/${top}/${dtbpkg}" -C /tmp/dt "${dtop}"
+          rm -rf /tmp/dt
+
+          tar -czf "${ver}.tar.gz" -C work "${top}"
+          rm -rf work "kernel-${ver}.tar.gz"
+          ls -lh "${ver}.tar.gz"
+
+      - name: 创建 kernel_stable Release（已存在则跳过）
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/kernel_stable")"
+          if [ "${code}" = "404" ]; then
+            curl -s -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases" \
+              -d '{"tag_name":"kernel_stable","name":"kernel_stable","body":"ophub prebuilt kernel with CM311 UART bluetooth dtb"}'
+          fi
+
+      - name: 上传内核包到 Release
+        uses: ophub/upload-to-releases@main
+        with:
+          tag: kernel_stable
+          artifacts: ${{ github.workspace }}/${{ env.KVER }}.tar.gz
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: false
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+
   # 2. 组合内核 + rootfs，打包 CM311-1a 可刷镜像
   image:
-    needs: [rootfs]
+    needs: [rootfs, kernel_dtb]
     runs-on: ubuntu-26.04
     env:
       KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
@@ -170,7 +261,7 @@ jobs:
           openwrt_board: ${{ env.BOARD }}
           openwrt_kernel: ${{ env.KERNEL_SERIES }}
           auto_kernel: true
-          kernel_repo: ophub/kernel
+          kernel_repo: ${{ github.repository }}
           kernel_usage: stable
           builder_name: steven-ye
 
@@ -193,6 +284,6 @@ jobs:
           body: |
             ### CM311-1a ImmortalWrt ${{ env.IMMORTALWRT_VERSION }}
             - 默认 IP: `192.168.1.1`，默认账号 `root`
-            - 蓝牙: RTL8761B（btusb + rtl8761bu 固件，bluez 开机自启）
-            - 内核: ophub/kernel `kernel_stable` 预编译包（config 与仓库 kernel-config 一致）
+            - 蓝牙: RTL8761B（UART 接口，hci_uart + btrtl，bluez 开机自启）
+            - 内核: ophub 预编译包 + 已替换的 CM311 蓝牙 dtb（本仓库 kernel_stable）
             - 刷机: 先写 U 盘启动验证，再在「系统 → 晶晨宝盒」安装到 eMMC，设备选 `CM311-1a-YST`

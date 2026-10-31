@@ -1,4 +1,6 @@
 #!/bin/sh
-# 开机启用蓝牙服务，保证重启后 hci0 自动恢复
+# 蓝牙挂在 UART(serial@24000) 上，需要 hci_uart(h5/rtl) 而不是 btusb
+modprobe bluetooth 2>/dev/null
+modprobe hci_uart 2>/dev/null
 [ -x /etc/init.d/bluetooth ] && /etc/init.d/bluetooth enable
 exit 0
