@@ -82,6 +82,10 @@ jobs:
           test -n "${mods}" || { echo "::error::合并包内未找到 modules 内核包"; exit 1; }
           tar -tzf "${work}/${top}/${mods}" | grep -qE 'bluetooth/(hci_uart|btrtl)/?.*\.ko' \
             || { echo "::error::内核未编入 hci_uart/btrtl，UART 蓝牙无法工作"; exit 1; }
+          tar -tzf "${work}/${top}/${mods}" | grep -q 'uhid\.ko' \
+            || { echo "::error::内核未编入 uhid.ko，蓝牙遥控输入无法工作"; exit 1; }
+          tar -tzf "${work}/${top}/${mods}" | grep -q 'hidp\.ko' \
+            || { echo "::error::内核未编入 hidp.ko，蓝牙遥控 HIDP 无法工作"; exit 1; }
 
           dtbpkg="$(ls "${work}/${top}" | grep -E '^dtb-amlogic-.*\.tar\.gz$' | head -n 1)"
           echo "dtb pkg: ${dtbpkg}"
@@ -146,9 +150,25 @@ jobs:
           test -s config/imagebuilder/files/lib/firmware/rtl_bt/rtl8761b_config.bin \
             || { echo "::error::缺少 rtl8761b_config.bin"; exit 1; }
 
+      - name: 刷新 USTC 源的 kmods 目录（内核 ABI 哈希会随 release 重建变化）
+        run: |
+          f=config/imagebuilder/files/etc/apk/repositories.d/distfeeds.list
+          d="$(curl -fsSL "https://mirrors.ustc.edu.cn/immortalwrt/releases/${IMMORTALWRT_VERSION}/targets/armsr/armv8/kmods/" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-1-[0-9a-f]{40}' | sort -u | tail -n1)" || true
+          if [ -n "${d}" ]; then
+            sed -i -E "s#kmods/[^/]+/packages.adb#kmods/${d}/packages.adb#" "${f}"
+            echo "kmods dir: ${d}"
+          else
+            echo "::warning::未能读取镜像站 kmods 目录，沿用仓库内配置"
+          fi
+          cat "${f}"
+
       - name: 构建 rootfs [ immortalwrt:${{ env.IMMORTALWRT_VERSION }} ]
         run: |
           chmod +x config/imagebuilder/imagebuilder.sh
+          # 覆盖层里的脚本在 Windows 上编辑，推送后可能丢失可执行位，这里是唯一可靠的兜底
+          chmod +x config/imagebuilder/files/etc/init.d/* \
+                   config/imagebuilder/files/etc/uci-defaults/* 2>/dev/null || true
           ./config/imagebuilder/imagebuilder.sh "immortalwrt:${IMMORTALWRT_VERSION}"
 
       - name: 门禁：固件与 bluez 必须存在
@@ -161,8 +181,56 @@ jobs:
             || { echo "::error::缺少 rtl8761b_config.bin"; exit 1; }
           tar -tzf "${rootfs}" | grep -Eq '(sbin|bin)/bluetoothctl' \
             || { echo "::error::缺少 bluetoothctl"; exit 1; }
-          tar -tzf "${rootfs}" | grep -q 'etc/uci-defaults/99-bluetooth' \
-            || { echo "::error::缺少蓝牙开机启用脚本"; exit 1; }
+          for f in \
+            etc/uci-defaults/99-bluetooth \
+            etc/uci-defaults/99-audio-bt \
+            etc/modules.d/60-uhid \
+            etc/init.d/av-mixer \
+            etc/init.d/pulseaudio \
+            etc/asound.conf \
+            etc/mpd.conf \
+            etc/pulse/system.pa \
+            etc/dbus-1/system.d/bluetooth.conf \
+            usr/share/dbus-1/system.d/pulseaudio-system.conf \
+            etc/apk/repositories.d/distfeeds.list \
+            etc/uci-defaults/99-apk-kernel-sync \
+            usr/bin/pulseaudio \
+            usr/bin/mpd \
+            usr/lib/pulseaudio/modules/module-bluez5-discover.so; do
+            tar -tzf "${rootfs}" | grep -q "$f" \
+              || { echo "::error::缺少 ${f}"; exit 1; }
+          done
+          # D-Bus 策略必须允许 bluetoothd 与 PulseAudio 互发方法调用，否则 A2DP 无法建立
+          tar -xzOf "${rootfs}" "$(tar -tzf "${rootfs}" | grep -m1 'etc/dbus-1/system.d/bluetooth.conf')" \
+            | grep -q 'send_type="method_call"' \
+            || { echo "::error::bluetooth.conf 未允许 method_call"; exit 1; }
+          tar -xzOf "${rootfs}" "$(tar -tzf "${rootfs}" | grep -m1 'usr/share/dbus-1/system.d/pulseaudio-system.conf')" \
+            | grep -q 'send_type="method_call"' \
+            || { echo "::error::pulseaudio-system.conf 未允许 method_call"; exit 1; }
+          # apk 源必须指向 USTC 镜像，否则新固件仍会从官方源拉包
+          tar -xzOf "${rootfs}" "$(tar -tzf "${rootfs}" | grep -m1 'etc/apk/repositories.d/distfeeds.list')" \
+            | grep -q 'mirrors.ustc.edu.cn/immortalwrt/releases/' \
+            || { echo "::error::distfeeds.list 未指向 USTC 镜像"; exit 1; }
+          # 板端现有 App 必须全部进固件
+          for b in \
+            usr/bin/docker usr/bin/python3 usr/bin/php8-cli \
+            usr/sbin/nginx usr/sbin/mosquitto usr/bin/ttyd \
+            usr/bin/upmpdcli usr/bin/mpc usr/bin/nano usr/bin/git \
+            usr/bin/frpc usr/bin/socat usr/sbin/smartctl \
+            usr/sbin/ksmbd.mountd usr/lib/acme/client/acme.sh; do
+            tar -tzf "${rootfs}" | grep -q "${b}" \
+              || { echo "::error::缺少 ${b}"; exit 1; }
+          done
+          # LuCI 应用（板端已安装，必须随固件提供）
+          for a in \
+            luci-app-acme luci-app-ddns luci-app-dockerman luci-app-firewall \
+            luci-app-frpc luci-app-ksmbd luci-app-mosquitto \
+            luci-app-package-manager luci-app-ttyd; do
+            tar -tzf "${rootfs}" | grep -q "usr/share/rpcd/acl.d/${a}.json" \
+              || { echo "::error::缺少 ${a}"; exit 1; }
+          done
+          tar -tzf "${rootfs}" | grep -q 'usr/lib/lua/luci/controller/diskman.lua' \
+            || { echo "::error::缺少 luci-app-diskman"; exit 1; }
 
       - name: 上传 rootfs
         uses: actions/upload-artifact@v4

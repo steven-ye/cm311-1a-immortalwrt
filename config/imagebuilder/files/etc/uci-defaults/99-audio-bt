@@ -1,0 +1,60 @@
+#!/bin/sh
+# 蓝牙音响（PulseAudio A2DP）+ MPD 首次启动初始化（幂等，可重复执行）
+
+add_group() {
+	grep -q "^$1:" /etc/group || echo "$1:x:$2:" >> /etc/group
+}
+
+add_user() {
+	grep -q "^$1:" /etc/passwd || echo "$1:x:$2:$3:$1:/var/run/$1:/bin/false" >> /etc/passwd
+}
+
+add_member() {
+	local grp="$1" user="$2" tmp="/tmp/group.$$"
+	awk -F: -v OFS=: -v g="$grp" -v u="$user" '
+		$1 == g {
+			n = split($4, m, ",")
+			for (i = 1; i <= n; i++) if (m[i] == u) { print; next }
+			$4 = ($4 == "") ? u : $4 "," u
+		}
+		{ print }
+	' /etc/group > "$tmp" && mv "$tmp" /etc/group && chmod 644 /etc/group
+}
+
+# 1) 运行账户（PulseAudio 系统模式 / MPD）
+add_group pulse 51
+add_user pulse 51 51
+add_group mpd 32769
+add_user mpd 32769 32769
+
+# 2) 组权限：mpd 需读 /dev/snd 与 PulseAudio socket，pulse 需访问声卡
+add_member audio pulse
+add_member audio mpd
+add_member pulse pulse
+add_member pulse mpd
+add_member pulse root
+
+# 3) PulseAudio 运行目录
+mkdir -p /var/run/pulse /var/lib/pulse
+chmod 0750 /var/run/pulse /var/lib/pulse
+chown pulse:pulse /var/run/pulse /var/lib/pulse
+
+# 4) MPD 媒体与数据库目录
+mkdir -p /media/music /media/.mpd/playlists
+chown -R mpd:mpd /media/.mpd
+chmod 0755 /media /media/music /media/.mpd
+
+# 5) 蓝牙配对密钥持久化目录
+mkdir -p /etc/bluetooth/keys
+chmod 0755 /etc/bluetooth/keys
+
+# 6) 内核模块：蓝牙遥控输入需要 uhid/uinput
+modprobe uhid 2>/dev/null
+modprobe uinput 2>/dev/null
+
+# 7) 开机自启
+for s in dbus mpd pulseaudio av-mixer; do
+	[ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" enable
+done
+
+exit 0

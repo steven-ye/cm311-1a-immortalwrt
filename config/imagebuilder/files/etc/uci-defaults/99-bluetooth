@@ -1,6 +1,13 @@
 #!/bin/sh
-# 蓝牙挂在 UART(serial@24000) 上，需要 hci_uart(h5/rtl) 而不是 btusb
+# 蓝牙挂在 UART(serial0-0 / ttyAML0) 上，需要 hci_uart(h5) 而不是 btusb
 modprobe bluetooth 2>/dev/null
 modprobe hci_uart 2>/dev/null
-[ -x /etc/init.d/bluetooth ] && /etc/init.d/bluetooth enable
+modprobe uhid 2>/dev/null
+modprobe uinput 2>/dev/null
+
+# 配对密钥保存到 /etc/bluetooth/keys（bluetoothd 会软链到 /var/lib/bluetooth）
+mkdir -p /etc/bluetooth/keys
+chmod 0755 /etc/bluetooth/keys
+
+[ -x /etc/init.d/bluetoothd ] && /etc/init.d/bluetoothd enable
 exit 0

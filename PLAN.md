@@ -7,7 +7,7 @@
 
 | 项目 | 决策 | 说明 |
 | --- | --- | --- |
-| 蓝牙芯片 | RTL8761B（USB 接口，`btusb` 驱动） | 对应 CM311-1a-YST 批次，固件为 `rtl8761bu_fw.bin` |
+| 蓝牙芯片 | RTL8761B（UART 接口 `/dev/ttyAML0`，`hci_uart` + `btrtl`） | 对应 CM311-1a-YST 批次，固件为 `rtl8761b_fw.bin` / `rtl8761b_config.bin` |
 | 内核 | 自编译 S905L3A 内核（unifreq 源码 + ophub 编译动作） | 完全控制蓝牙相关 config，不依赖上游内核是否带 `btusb` |
 | 首版刷机 | 先 USB 启动验证，通过后再写 eMMC | 避免直接写 eMMC 导致变砖 |
 | 用户空间 | ImmortalWrt 25.12.2 `armsr/armv8` | 版本严格锁定 25.12.2 |
@@ -81,15 +81,20 @@ ImmortalWrt 25.12.2 官方 target 列表（`dl.wrt.moe/releases/25.12.2/targets/
 ### 4.1 内核配置（显式写入 `kernel-config/config-6.6`）
 
 ```
-CONFIG_BT=y
-CONFIG_BT_HCIBTUSB=m        # RTL8761B 走 USB，决定成败
-CONFIG_BT_HCIUART=m         # 备用
+CONFIG_BT=m
+CONFIG_BT_HCIBTUSB=m        # 备用（同批次存在 USB 版本）
+CONFIG_BT_HCIUART=m         # RTL8761B 走 UART，决定成败
+CONFIG_BT_HCIUART_SERDEV=y
+CONFIG_BT_HCIUART_H4=y
+CONFIG_BT_HCIUART_3WIRE=y   # 内核绑定 hci_uart_h5
 CONFIG_BT_HCIUART_RTL=y
 CONFIG_BT_RFCOMM=m
 CONFIG_BT_RFCOMM_TTY=y
 CONFIG_BT_BNEP=m
 CONFIG_BT_HIDP=m
 CONFIG_BT_LE=y
+CONFIG_UHID=m               # 蓝牙遥控（BLE HID）注入输入子系统
+CONFIG_INPUT_UINPUT=y
 CONFIG_RFKILL=y
 ```
 
@@ -99,18 +104,29 @@ CONFIG_RFKILL=y
 
 `files/lib/firmware/rtl_bt/` 内置：
 
-- `rtl8761bu_fw.bin`
-- `rtl8761bu_config.bin`
+- `rtl8761b_fw.bin`
+- `rtl8761b_config.bin`
 
 固件不依赖内核 ABI，从 linux-firmware 取用后直接打进 rootfs，是最安全的一环。
 
 ### 4.3 用户态
 
 - 包：`bluez-daemon`、`bluez-utils`（含 `bluetoothctl`）、`dbus`；
-- UCI 默认值：`bluetoothd` 开机自启；
-- 校验 `/etc/init.d/bluetooth` 存在。
+- UCI 默认值：`bluetoothd` 开机自启（init 脚本名为 `/etc/init.d/bluetoothd`）；
+- 校验 `/etc/init.d/bluetoothd` 存在。
 
-### 4.4 验收命令
+### 4.4 蓝牙音响 + 蓝牙遥控（已在旧固件上验证，固化进镜像）
+
+| 组件 | 包 | 固化文件 |
+| --- | --- | --- |
+| 音频服务 | `pulseaudio-daemon-avahi`、`pulseaudio-tools` | `etc/init.d/pulseaudio`（`chown root:audio` + `chmod 660`）、`etc/pulse/system.pa`（`module-bluez5-discover`、`module-bluetooth-policy`、`module-native-protocol-unix auth-anonymous=1`） |
+| 播放器 | `mpd-full`、`mpc` | `etc/mpd.conf`（`audio_output type "pulse"` 指向 `/var/run/pulse/native`，音乐库 `/media/music`，数据库 `/media/.mpd`） |
+| AV 输出 | `alsa-utils` | `etc/init.d/av-mixer`（加载 16 个 meson 音频模块 + TDM_B 路由，音量 255,255）、`etc/asound.conf` |
+| 遥控输入 | 内核 `uhid`/`uinput`/`hidp` | `etc/modules.d/60-uhid` |
+| D-Bus 策略 | — | `etc/dbus-1/system.d/bluetooth.conf` 与 `usr/share/dbus-1/system.d/pulseaudio-system.conf` 追加 `<allow send_type="method_call"/>`、`<allow send_type="method_return"/>`，否则 bluetoothd 与 PulseAudio 无法互发方法调用，A2DP 建不起来 |
+| 首次启动 | — | `etc/uci-defaults/99-bluetooth`（`hci_uart`、配对密钥 `keys` 目录、`bluetoothd` 自启）、`etc/uci-defaults/99-audio-bt`（建 `pulse`/`mpd` 用户、组权限、目录、`mpd`/`pulseaudio`/`av-mixer` 自启） |
+
+### 4.5 验收命令
 
 ```bash
 dmesg | grep -iE "bluetooth|hci"
@@ -125,17 +141,19 @@ bluetoothctl
 
 以下任一项不满足即构建失败，防止“刷完才发现没蓝牙”：
 
-1. 内核 `modules` 包内存在 `kernel/drivers/bluetooth/btusb.ko`；
-2. 镜像内存在 `rtl8761bu_fw.bin` 与 `rtl8761bu_config.bin`；
-3. 镜像内存在 bluez init 脚本与 `bluetoothctl`；
-4. 打包时 DTB 正确匹配 `CM311-1a-YST`（`s905l3a` 设备表）；
-5. 镜像可解包且 rootfs 大小在预期范围（防止打包空洞）。
+1. 内核 `modules` 包内存在 `bluetooth/hci_uart.ko`（含 `btrtl`）、`uhid.ko`、`hidp.ko`；
+2. 镜像内存在 `rtl8761b_fw.bin` 与 `rtl8761b_config.bin`；
+3. 镜像内存在 `bluetoothctl`、`pulseaudio`、`module-bluez5-discover.so`、`mpd`；
+4. 覆盖层文件齐全：`60-uhid`、`av-mixer`、`asound.conf`、`mpd.conf`、`pulse/system.pa`、两个 D-Bus 策略；
+5. D-Bus 策略中必须含 `send_type="method_call"`（`bluetooth.conf` 与 `pulseaudio-system.conf`）；
+6. 打包时 DTB 正确匹配 `CM311-1a-YST`（`s905l3a` 设备表）；
+7. 镜像可解包且 rootfs 大小在预期范围（防止打包空洞）。
 
 ## 6. 刷机与验证流程
 
 1. 用 Rufus/balenaEtcher 将 `*.img.gz` 写入 U 盘；
 2. U 盘插入盒子通电，访问 `http://192.168.1.1`；
-3. 完成第 4.4 节蓝牙验收；
+3. 完成第 4.5 节蓝牙/音频/遥控验收；
 4. 同时确认 100M 网口与 WiFi 状态，避免蓝牙正常但无线异常；
 5. 全部通过后，使用晶晨宝盒（luci-app-amlogic）安装到 eMMC，设备选 `CM311-1a-YST`。
 

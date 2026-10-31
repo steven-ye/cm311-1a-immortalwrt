@@ -28,7 +28,10 @@
 - 用户空间：ImmortalWrt 25.12.2 `armsr/armv8`，用 ophub `config/imagebuilder/imagebuilder.sh`，已移除 4 个 `kmod-*`
 - 内核：直接用 `ophub/kernel` 的 `kernel_stable` 预编译包（6.6.160），不再自编译
 - 打包：`openwrt_board: s905l3a-cm311`、`kernel_repo: ophub/kernel`、`kernel_usage: stable`、`auto_kernel: true`
-- 蓝牙：`btusb` + 内置 `rtl8761bu_fw.bin` / `rtl8761bu_config.bin`（从 Debian firmware-realtek 提取），bluez 开机自启
+- 蓝牙：UART(`serial0-0`/`hci_uart_h5` + `btrtl`) + 内置 `rtl8761b_fw.bin` / `rtl8761b_config.bin`，`bluetoothd` 开机自启
+- 蓝牙音响：`pulseaudio-daemon-avahi`（`module-bluez5-discover`）+ `mpd-full`（pulse 输出），配置全部固化在 `config/imagebuilder/files/`
+- 蓝牙遥控：内核 `uhid`/`uinput`/`hidp` + `etc/modules.d/60-uhid`
+- D-Bus：`bluetooth.conf` 与 `pulseaudio-system.conf` 均放行 `send_type="method_call"` / `"method_return"`
 
 ## 蓝牙/DTS 备用文件（仅在出问题后使用）
 

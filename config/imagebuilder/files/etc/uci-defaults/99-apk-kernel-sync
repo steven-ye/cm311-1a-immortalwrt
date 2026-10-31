@@ -1,0 +1,44 @@
+#!/bin/sh
+# 首次启动：让 apk 安装库里的 kernel/kmod 记录与 world 中的 kernel 版本约束一致。
+#
+# 背景：ImageBuilder 产出的 rootfs 中，/etc/apk/world 固定的是当前软件源那一代 kernel
+# （如 6.12.103~22bb9c5f…-r1），而 /lib/apk/db/installed 里的 kernel 记录仍是构建时的旧版本
+# （如 6.12.74~b7d265de…-r1）。两者不一致时，apk 安装任何依赖 kernel 的包都会报
+# “需要 6.12.103… 而 6.12.74… 已安装”，luci 软件包页也无法安装任何 kmod。
+#
+# 这里只改写 apk 数据库中的版本串与模块目录路径，不下载、不替换任何文件，
+# 不影响实际运行的内核（6.6.160-ophub）。
+
+[ -x /sbin/apk ] || exit 0
+[ -f /etc/apk/world ] || exit 0
+[ -f /lib/apk/db/installed ] || exit 0
+
+world_ver="$(sed -n 's/^kernel=([^ ]*)$/\1/p' /etc/apk/world 2>/dev/null | head -n1)"
+db_ver="$(awk -F: '/^P:kernel$/{f=1;next} f&&/^V:/{print $2;exit}' /lib/apk/db/installed 2>/dev/null)"
+
+# world 没有固定具体版本，或两边一致，都无需处理
+case "$world_ver" in "") exit 0 ;; esac
+case "$world_ver" in *"~"*) ;; *) exit 0 ;; esac
+[ -n "$db_ver" ] || exit 0
+[ "$db_ver" = "$world_ver" ] && exit 0
+
+old_dir="${db_ver%%~*}"
+new_dir="${world_ver%%~*}"
+
+cp /lib/apk/db/installed /etc/apk/installed.pre-sync 2>/dev/null
+
+# 1) 版本串（含 ~commit-rN）
+old_esc="$(echo "$db_ver" | sed 's/\./\\./g')"
+sed -i "s#${old_esc}#${world_ver}#g" /lib/apk/db/installed
+
+# 2) 模块目录路径
+sed -i "s#lib/modules/${old_dir}#lib/modules/${new_dir}#g" /lib/apk/db/installed
+
+# 3) 目录重命名/补建，避免 kmod 包安装时找不到路径
+if [ -d "/lib/modules/${old_dir}" ] && [ ! -d "/lib/modules/${new_dir}" ]; then
+	mv "/lib/modules/${old_dir}" "/lib/modules/${new_dir}"
+elif [ ! -d "/lib/modules/${new_dir}" ]; then
+	mkdir -p "/lib/modules/${new_dir}"
+fi
+
+exit 0

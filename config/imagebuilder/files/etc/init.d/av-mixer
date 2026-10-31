@@ -1,0 +1,47 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+
+MODULES="
+snd-soc-meson-t9015
+snd-soc-meson-g12a-toacodec
+snd-soc-meson-g12a-tohdmitx
+snd-soc-meson-codec-glue
+snd-soc-meson-card-utils
+snd-soc-meson-axg-fifo
+snd-soc-meson-axg-frddr
+snd-soc-meson-axg-toddr
+snd-soc-meson-axg-tdm-formatter
+snd-soc-meson-axg-tdm-interface
+snd-soc-meson-axg-tdmout
+snd-soc-meson-axg-tdmin
+snd-soc-meson-axg-spdifin
+snd-soc-meson-axg-spdifout
+snd-soc-meson-axg-pdm
+snd-soc-meson-axg-sound-card
+"
+
+start() {
+	chown root:audio /dev/snd/* 2>/dev/null
+	chmod 660 /dev/snd/* 2>/dev/null
+	for m in $MODULES; do
+		modprobe "$m" 2>/dev/null
+	done
+
+	i=0
+	while [ ! -f /proc/asound/card0/id ] && [ "$i" -lt 20 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	[ -f /proc/asound/card0/id ] || return 1
+
+	# AV(3.5mm) 播放路由：FRDDR_A -> TDMOUT_B -> toacodec IN B(I2S B) -> t9015 -> Lineout -> 放大器
+	amixer -c 0 cset name='FRDDR_A SRC 1 EN Switch' on
+	amixer -c 0 cset name='FRDDR_A SINK 1 SEL' 1
+	amixer -c 0 cset name='TOACODEC SRC' 1
+	amixer -c 0 cset name='TOACODEC OUT EN Switch' on
+	amixer -c 0 cset name='ACODEC Playback Switch' on
+	amixer -c 0 cset name='ACODEC Playback Volume' 255,255
+}
+
+stop() { :; }
