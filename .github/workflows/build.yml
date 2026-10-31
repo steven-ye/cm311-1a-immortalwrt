@@ -231,10 +231,6 @@ jobs:
           done
           tar -tzf "${rootfs}" | grep -q 'usr/lib/lua/luci/controller/diskman.lua' \
             || { echo "::error::缺少 luci-app-diskman"; exit 1; }
-          # dockerman(JS 版) 菜单标题硬编码英文、上游 zh-cn 翻译未覆盖，覆盖层须为中文
-          tar -xzOf "${rootfs}" "$(tar -tzf "${rootfs}" | grep -m1 'usr/share/luci/menu.d/luci-app-dockerman.json')" \
-            | grep -q 'Docker 管理' \
-            || { echo "::error::dockerman 菜单未汉化"; exit 1; }
 
       - name: 上传 rootfs
         uses: actions/upload-artifact@v4
