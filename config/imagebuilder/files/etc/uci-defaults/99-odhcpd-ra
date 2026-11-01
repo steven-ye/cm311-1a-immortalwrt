@@ -1,0 +1,9 @@
+#!/bin/sh
+# 本机是纯 LAN 网关（无 IPv6 上游）：明确不通告默认路由，
+# 避免 odhcpd 每 3 分钟刷一次 "No default route present, setting ra_lifetime to 0" 告警。
+# 客户端仍可正常通过 RA 拿到 ULA 地址，IPv4 网关不受影响。
+
+[ "$(uci -q get dhcp.lan.ra_default)" = "2" ] && exit 0
+uci set dhcp.lan.ra_default='2'
+uci commit dhcp
+exit 0

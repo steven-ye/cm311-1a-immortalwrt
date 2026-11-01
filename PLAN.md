@@ -125,6 +125,7 @@ CONFIG_RFKILL=y
 | 遥控输入 | 内核 `uhid`/`uinput`/`hidp` | `etc/modules.d/60-uhid` |
 | D-Bus 策略 | — | `etc/dbus-1/system.d/bluetooth.conf` 与 `usr/share/dbus-1/system.d/pulseaudio-system.conf` 追加 `<allow send_type="method_call"/>`、`<allow send_type="method_return"/>`，否则 bluetoothd 与 PulseAudio 无法互发方法调用，A2DP 建不起来 |
 | 首次启动 | — | `etc/uci-defaults/99-bluetooth`（`hci_uart`、配对密钥 `keys` 目录、`bluetoothd` 自启）、`etc/uci-defaults/99-audio-bt`（建 `pulse`/`mpd` 用户、组权限、目录、`mpd`/`pulseaudio`/`av-mixer` 自启） |
+| 网络（IPv6 RA） | — | `etc/uci-defaults/99-odhcpd-ra`（无 IPv6 上游时置 `dhcp.lan.ra_default=2`，避免 odhcpd 每 3 分钟刷 `setting ra_lifetime to 0`） |
 
 ### 4.5 验收命令
 
