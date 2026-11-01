@@ -136,9 +136,17 @@ jobs:
           target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
           test -n "${target}" || { echo "::error::dtb 包内未找到 cm311 dtb"; exit 1; }
           cp -f "${src}" "${target}"
-          dtop="$(ls /tmp/dt | head -n 1)"
-          tar -czf "${work}/${top}/${dtbpkg}" -C /tmp/dt "${dtop}"
-          rm -rf /tmp/dt
+          # dtb 包是扁平结构（dtb 直接放在根，没有顶层目录），必须整包重打
+          n_orig="$(ls -A /tmp/dt | wc -l)"
+          tar -czf "${work}/${top}/${dtbpkg}" -C /tmp/dt .
+          n_new="$(tar -tzf "${work}/${top}/${dtbpkg}" | wc -l)"
+          echo "dtb members: ${n_orig} -> ${n_new}"
+          [ "${n_new}" -ge "${n_orig}" ] || { echo "::error::dtb 包重组后条目数异常 ${n_new}/${n_orig}"; exit 1; }
+          rm -rf /tmp/dt /tmp/dtck && mkdir -p /tmp/dtck
+          tar -xzf "${work}/${top}/${dtbpkg}" -C /tmp/dtck
+          cmp -s "${src}" "$(find /tmp/dtck -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)" \
+            || { echo "::error::dtb 包内 cm311 dtb 未替换成功"; exit 1; }
+          rm -rf /tmp/dtck
           echo "patched dtb: ${target}"
 
           tar -czf "${outer}" -C "${work}" "${top}"
@@ -321,9 +329,17 @@ jobs:
           target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
           test -n "${target}" || { echo "::error::dtb 包内未找到 cm311 dtb"; exit 1; }
           cp -f "${src}" "${target}"
-          dtop="$(ls /tmp/dt | head -n 1)"
-          tar -czf "work/${top}/${dtbpkg}" -C /tmp/dt "${dtop}"
-          rm -rf /tmp/dt
+          # dtb 包是扁平结构（dtb 直接放在根，没有顶层目录），必须整包重打
+          n_orig="$(ls -A /tmp/dt | wc -l)"
+          tar -czf "work/${top}/${dtbpkg}" -C /tmp/dt .
+          n_new="$(tar -tzf "work/${top}/${dtbpkg}" | wc -l)"
+          echo "dtb members: ${n_orig} -> ${n_new}"
+          [ "${n_new}" -ge "${n_orig}" ] || { echo "::error::dtb 包重组后条目数异常 ${n_new}/${n_orig}"; exit 1; }
+          rm -rf /tmp/dt /tmp/dtck && mkdir -p /tmp/dtck
+          tar -xzf "work/${top}/${dtbpkg}" -C /tmp/dtck
+          cmp -s "${src}" "$(find /tmp/dtck -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)" \
+            || { echo "::error::dtb 包内 cm311 dtb 未替换成功"; exit 1; }
+          rm -rf /tmp/dtck
 
           # 内核包内自带 sha256sums 清单，改动 dtb 后必须重算，否则打包时会校验失败
           if [ -f "work/${top}/sha256sums" ]; then
