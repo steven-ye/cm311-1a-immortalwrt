@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "内核系列（image job 使用，如 6.6.y）"
-        required: false
+        description: "内核系列（镜像打包使用；自编译还需仓库内有 kernel-config/config-X.Y）"
+        type: choice
         default: "6.6.y"
+        options:
+          - "6.6.y"
+          - "6.12.y"
+          - "6.18.y"
+          - "6.1.y"
       build_kernel:
         description: "是否自编译内核（默认 false，直接使用 ophub/kernel 预编译包）"
         required: false
@@ -258,10 +263,13 @@ jobs:
       - name: 下载内核并替换 dtb
         run: |
           set -e
+          series="${{ inputs.kernel_version || '6.6.y' }}"
+          mm="${series%.y}"
+          esc="$(echo "${mm}" | sed 's/\./\\./g')"
           ver="$(curl -sL "https://api.github.com/repos/ophub/kernel/releases/tags/kernel_stable" \
-            | grep -oE '"name":\s*"6\.6\.[0-9]+\.tar\.gz"' \
+            | grep -oE "\"name\":\s*\"${esc}\.[0-9]+\.tar\.gz\"" \
             | sed -E 's/.*"([0-9.]+)\.tar\.gz".*/\1/' | sort -V | tail -n1)"
-          test -n "${ver}" || { echo "::error::未找到 6.6 内核包"; exit 1; }
+          test -n "${ver}" || { echo "::error::ophub 未提供 ${series} 内核包"; exit 1; }
           echo "KVER=${ver}" >> "${GITHUB_ENV}"
           echo "kernel version: ${ver}"
           curl -fL --retry 3 -o "kernel-${ver}.tar.gz" \
