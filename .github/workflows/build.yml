@@ -13,9 +13,13 @@ on:
           - "6.18.y"
           - "6.1.y"
       build_kernel:
-        description: "是否自编译内核（默认 false，直接使用 ophub/kernel 预编译包）"
-        required: false
-        default: "false"
+        description: "是否编译内核（auto=不存在才编译；force=强制重新编译；false=直接用 ophub 预编译）"
+        type: choice
+        default: "auto"
+        options:
+          - "auto"
+          - "force"
+          - "false"
   push:
     tags:
       - "v*"
@@ -29,10 +33,10 @@ env:
   BOARD: "s905l3a-cm311"
 
 jobs:
-  # 可选：自编译内核。仓库内 kernel-config/config-6.6 与 ophub stable 模板一致，
-  # 默认关闭，直接使用 ophub/kernel 的 kernel_stable 预编译包（已含 btusb.ko）。
+  # 编译内核（auto/force）。auto 时若 kernel_stable 已有该系列包则整段跳过，
+  # 直接复用（内核包里的 dtb 早已按 UART 蓝牙要求替换过）。
   kernel:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_kernel == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_kernel != 'false' }}
     runs-on: ubuntu-26.04-arm
     env:
       KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
@@ -41,7 +45,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: 判断是否需要编译
+        id: decide
+        run: |
+          set -e
+          mode="${{ inputs.build_kernel }}"
+          series="${KERNEL_SERIES}"
+          mm="${series%.y}"
+          esc="$(echo "${mm}" | sed 's/\./\\./g')"
+          built=true
+          if [ "${mode}" = "force" ]; then
+            echo "force：强制重新编译 ${series}"
+          else
+            have="$(curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/kernel_stable" \
+              | grep -oE "\"name\":\s*\"${esc}\.[0-9]+[^\"]*\.tar\.gz\"" | head -n 1 \
+              | sed -E 's/.*"([^"]+)".*/\1/')"
+            if [ -n "${have}" ]; then
+              built=false
+              echo "auto：kernel_stable 已存在 ${have}，跳过编译"
+            else
+              echo "auto：kernel_stable 无 ${series} 包，开始编译"
+            fi
+          fi
+          echo "built=${built}" >> "${GITHUB_OUTPUT}"
+
       - name: 校验内核配置（仓库内置 config-6.6）
+        if: steps.decide.outputs.built == 'true'
         run: |
           CONFIG_FILE="kernel-config/config-${KERNEL_SERIES%.y}"
           echo "config: ${CONFIG_FILE}"
@@ -57,6 +87,7 @@ jobs:
             || { echo "::error::内核配置缺少 CONFIG_SERIAL_DEV_BUS=y（serdev 绑定需要）"; exit 1; }
 
       - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
+        if: steps.decide.outputs.built == 'true'
         uses: ophub/amlogic-s9xxx-armbian@main
         with:
           build_target: kernel
@@ -70,6 +101,7 @@ jobs:
       # <ver><sign>/{boot,dtb-*,modules}-*.tar.gz。
       # 蓝牙走 UART(hci_uart + btrtl)，并替换成带蓝牙节点、旧固件验证过的 cm311 dtb。
       - name: 校验蓝牙模块 + 替换 CM311 dtb
+        if: steps.decide.outputs.built == 'true'
         run: |
           outer="$(find "${PACKAGED_OUTPUTPATH}" -maxdepth 1 -name '*.tar.gz' | head -n 1)"
           echo "outer: ${outer}"
@@ -118,6 +150,7 @@ jobs:
           ls -lh "${outer}"
 
       - name: 规范化内核包名（打包阶段按 <version>.tar.gz 下载）
+        if: steps.decide.outputs.built == 'true'
         run: |
           cd "${PACKAGED_OUTPUTPATH}"
           ver="$(echo "${PACKAGED_OUTPUTTAGS}" | awk '{print $1}')"
@@ -137,7 +170,7 @@ jobs:
           ls -lh *.tar.gz
 
       - name: 发布内核到 Release
-        if: env.PACKAGED_STATUS == 'success'
+        if: steps.decide.outputs.built == 'true' && env.PACKAGED_STATUS == 'success'
         uses: ophub/upload-to-releases@main
         with:
           tag: kernel_stable
@@ -254,7 +287,9 @@ jobs:
 
   # 1.5 取 ophub 预编译内核，替换成带 UART 蓝牙节点的 CM311 dtb，再发到本仓库 kernel_stable
   # （打包动作会把内核内的 dtb 解压到 /boot/dtb/amlogic，覆盖自定义文件，所以只能改内核包）
+  # 仅在 build_kernel=false（不自编译）时执行，避免覆盖自编译内核
   kernel_dtb:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_kernel == 'false' }}
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
@@ -339,7 +374,9 @@ jobs:
 
   # 2. 组合内核 + rootfs，打包 CM311-1a 可刷镜像
   image:
-    needs: [rootfs, kernel_dtb]
+    needs: [rootfs, kernel, kernel_dtb]
+    # kernel 与 kernel_dtb 互斥（谁跳过都行），只要 rootfs 成功、且两路内核之一成功就能打包
+    if: ${{ always() && needs.rootfs.result == 'success' && (needs.kernel.result == 'success' || needs.kernel_dtb.result == 'success') }}
     runs-on: ubuntu-26.04
     env:
       KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
