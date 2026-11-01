@@ -150,32 +150,39 @@ jobs:
       - name: 校验蓝牙模块 + 替换 CM311 dtb
         if: steps.decide.outputs.built == 'true'
         run: |
-          outer="$(find "${PACKAGED_OUTPUTPATH}" -maxdepth 1 -name '*.tar.gz' | head -n 1)"
+          # 产物目录里同时有内核包和 deb 包，只取内核包
+          outer="$(ls -1 "${PACKAGED_OUTPUTPATH}"/*.tar.gz 2>/dev/null | grep -v '/deb-' | head -n 1)"
+          [ -n "${outer}" ] || outer="$(ls -1 "${PACKAGED_OUTPUTPATH}"/*.tar.gz | head -n 1)"
           echo "outer: ${outer}"
           test -s "${outer}" || { echo "::error::内核目录下没有 tar.gz 产物"; exit 1; }
           src="${GITHUB_WORKSPACE}/fallback/dtb/meson-g12a-s905l3a-cm311.dtb"
           test -s "${src}" || { echo "::error::仓库缺少 fallback dtb"; exit 1; }
 
+          # 不假设目录层级：直接按成员路径在整包里找三类内层包
+          members="$(tar -tzf "${outer}")"
+          mods_rel="$(echo "${members}" | grep -E 'modules-[^/]+\.tar\.gz$' | head -n 1)"
+          dtb_rel="$(echo "${members}" | grep -E 'dtb-amlogic-[^/]+\.tar\.gz$' | head -n 1)"
+          boot_rel="$(echo "${members}" | grep -E 'boot-[^/]+\.tar\.gz$' | head -n 1)"
+          echo "modules: ${mods_rel}"; echo "dtb: ${dtb_rel}"; echo "boot: ${boot_rel}"
+          if [ -z "${mods_rel}" ] || [ -z "${dtb_rel}" ] || [ -z "${boot_rel}" ]; then
+            echo "::error::内核包结构异常，缺 modules/dtb/boot；成员=$(echo "${members}" | head -n 30 | tr '\n' ' ')"
+            exit 1
+          fi
+
           work="$(mktemp -d)"
           tar -mxzf "${outer}" -C "${work}"
-          top="$(ls "${work}" | head -n 1)"
-          echo "top: ${top}"
 
-          mods="$(ls "${work}/${top}" | grep -E '^modules-.*\.tar\.gz$' | head -n 1)"
-          echo "modules: ${mods}"
-          test -n "${mods}" || { echo "::error::合并包内未找到 modules 内核包"; exit 1; }
-          tar -tzf "${work}/${top}/${mods}" | grep -qE 'bluetooth/(hci_uart|btrtl)/?.*\.ko' \
+          mods="${work}/${mods_rel}"
+          tar -tzf "${mods}" | grep -qE 'bluetooth/(hci_uart|btrtl)/?.*\.ko' \
             || { echo "::error::内核未编入 hci_uart/btrtl，UART 蓝牙无法工作"; exit 1; }
-          tar -tzf "${work}/${top}/${mods}" | grep -q 'uhid\.ko' \
+          tar -tzf "${mods}" | grep -q 'uhid\.ko' \
             || { echo "::error::内核未编入 uhid.ko，蓝牙遥控输入无法工作"; exit 1; }
-          tar -tzf "${work}/${top}/${mods}" | grep -q 'hidp\.ko' \
+          tar -tzf "${mods}" | grep -q 'hidp\.ko' \
             || { echo "::error::内核未编入 hidp.ko，蓝牙遥控 HIDP 无法工作"; exit 1; }
 
-          dtbpkg="$(ls "${work}/${top}" | grep -E '^dtb-amlogic-.*\.tar\.gz$' | head -n 1)"
-          echo "dtb pkg: ${dtbpkg}"
-          test -n "${dtbpkg}" || { echo "::error::合并包内未找到 dtb-amlogic"; exit 1; }
+          dtbpkg="${work}/${dtb_rel}"
           rm -rf /tmp/dt && mkdir -p /tmp/dt
-          tar -xzf "${work}/${top}/${dtbpkg}" -C /tmp/dt
+          tar -xzf "${dtbpkg}" -C /tmp/dt
           target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
           added=0
           if [ -n "${target}" ]; then
@@ -190,24 +197,28 @@ jobs:
           fi
           # dtb 包是扁平结构（dtb 直接放在根，没有顶层目录），必须整包重打
           n_orig="$(ls -A /tmp/dt | wc -l)"
-          tar -czf "${work}/${top}/${dtbpkg}" -C /tmp/dt .
-          n_new="$(tar -tzf "${work}/${top}/${dtbpkg}" | wc -l)"
+          tar -czf "${dtbpkg}" -C /tmp/dt .
+          n_new="$(tar -tzf "${dtbpkg}" | wc -l)"
           echo "dtb members: ${n_orig} (added=${added}) -> ${n_new}"
           [ "${n_new}" -ge "${n_orig}" ] || { echo "::error::dtb 包重组后条目数异常 ${n_new}/${n_orig}"; exit 1; }
           rm -rf /tmp/dt /tmp/dtck && mkdir -p /tmp/dtck
-          tar -xzf "${work}/${top}/${dtbpkg}" -C /tmp/dtck
+          tar -xzf "${dtbpkg}" -C /tmp/dtck
           cmp -s "${src}" "$(find /tmp/dtck -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)" \
             || { echo "::error::dtb 包内 cm311 dtb 未写入成功"; exit 1; }
           rm -rf /tmp/dtck
           echo "cm311 dtb ok (added=${added})"
 
           # 内核包自带 sha256sums 清单，改动内层包后必须重算，否则打包时会校验失败
-          if [ -f "${work}/${top}/sha256sums" ]; then
-            ( cd "${work}/${top}" && sha256sum $(awk '{print $2}' sha256sums) > sha256sums )
-            echo "sha256sums 已重算"
+          sumf="$(find "${work}" -name sha256sums | head -n 1)"
+          if [ -n "${sumf}" ]; then
+            ( cd "$(dirname "${sumf}")" && sha256sum $(awk '{print $2}' sha256sums) > sha256sums )
+            echo "sha256sums 已重算: ${sumf}"
           fi
 
-          tar -czf "${outer}" -C "${work}" "${top}"
+          # 重打外层包：保留原有顶层条目名，避免 packit 找不到内核目录
+          tmp="${outer%.tar.gz}.repack.tar.gz"
+          tar -czf "${tmp}" -C "${work}" $(ls -A "${work}")
+          mv -f "${tmp}" "${outer}"
           rm -rf "${work}"
           ls -lh "${outer}"
 
@@ -215,19 +226,22 @@ jobs:
         if: steps.decide.outputs.built == 'true'
         run: |
           cd "${PACKAGED_OUTPUTPATH}"
-          ver="$(echo "${PACKAGED_OUTPUTTAGS}" | awk '{print $1}')"
-          echo "version: ${ver}"
-          if [[ ! -f "${ver}.tar.gz" ]]; then
-            src="$(ls -1 *.tar.gz | grep -v '^deb-' | grep "${ver}" | head -n 1)"
+          # packit 按 <内核版本>/boot-<内核版本>*.tar.gz 找内核包，目录名必须是 6.12.103 这种纯版本号
+          ver="${KERNEL_SERIES}"
+          echo "target: ${ver}.tar.gz"
+          rm -f deb-*.tar.gz 2>/dev/null || true
+          if [ ! -f "${ver}.tar.gz" ]; then
+            src="$(ls -1 *.tar.gz | grep -v '^deb-' | head -n 1)"
             echo "repack: ${src} -> ${ver}.tar.gz"
             rm -rf /tmp/kx && mkdir -p /tmp/kx
             tar -mxzf "${src}" -C /tmp/kx
-            inner="$(ls /tmp/kx | head -n 1)"
+            inner="$(ls -A /tmp/kx | head -n 1)"
+            [ -n "${inner}" ] || { echo "::error::内核包解压后为空"; exit 1; }
             if [[ "${inner}" != "${ver}" ]]; then
               mv "/tmp/kx/${inner}" "/tmp/kx/${ver}"
             fi
             tar -czf "${ver}.tar.gz" -C /tmp/kx "${ver}"
-            rm -rf /tmp/kx
+            rm -rf /tmp/kx "${src}"
           fi
           ls -lh *.tar.gz
 
