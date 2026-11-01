@@ -83,6 +83,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: 准备内核配置（仓库缺该系列时拉 ophub 模板 + 蓝牙片段）
+        run: |
+          set -e
+          cfg="kernel-config/config-${KERNEL_SERIES%.y}"
+          if [ -s "${cfg}" ]; then
+            echo "使用仓库内置 ${cfg}"
+          else
+            echo "仓库无 ${cfg}，拉取 ophub 模板并追加 bt.fragment"
+            curl -fsSL --retry 3 -o "${cfg}" \
+              "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-${KERNEL_SERIES%.y}" \
+              || { echo "::error::无法获取 ${KERNEL_SERIES} 内核配置模板"; exit 1; }
+            cat kernel-config/bt.fragment >> "${cfg}"
+          fi
+
       - name: 判断是否需要编译
         id: decide
         run: |
