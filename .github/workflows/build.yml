@@ -24,6 +24,9 @@ on:
   push:
     tags:
       - "v*"
+      # 纯数字 tag（如 6.12.103）= 只编译该版本内核，不打包镜像
+      # 用于没有 PAT、无法 workflow_dispatch 时触发内核构建
+      - "6.*"
 
 permissions:
   contents: write
@@ -37,10 +40,11 @@ jobs:
   # 编译内核（auto/force）。auto 时若 kernel_stable 已有该系列包则整段跳过，
   # 直接复用（内核包里的 dtb 早已按 UART 蓝牙要求替换过）。
   kernel:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_kernel != 'false' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.build_kernel != 'false') || (github.event_name == 'push' && startsWith(github.ref_name, '6.')) }}
     runs-on: ubuntu-26.04-arm
     env:
-      KERNEL_SERIES: ${{ inputs.kernel_version || '6.6.y' }}
+      # tag 触发时 tag 名就是内核版本（如 6.12.103）
+      KERNEL_SERIES: ${{ github.event_name == 'push' && github.ref_name || (inputs.kernel_version || '6.6.y') }}
       KERNEL_SIGN: "-cm311bt"
     steps:
       - name: Checkout
@@ -241,6 +245,8 @@ jobs:
 
   # 1. ImmortalWrt 25.12.2 armsr/armv8 rootfs（LuCI + bluez + 蓝牙固件）
   rootfs:
+    # 纯数字内核 tag 只跑内核 job，跳过 rootfs/镜像
+    if: ${{ github.event_name != 'push' || startsWith(github.ref_name, 'v') }}
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
@@ -347,7 +353,7 @@ jobs:
   # （打包动作会把内核内的 dtb 解压到 /boot/dtb/amlogic，覆盖自定义文件，所以只能改内核包）
   # 仅在 build_kernel=false（不自编译）时执行，避免覆盖自编译内核
   kernel_dtb:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_kernel == 'false' }}
+    if: ${{ inputs.build_kernel == 'false' || (github.event_name == 'push' && startsWith(github.ref_name, 'v')) }}
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
