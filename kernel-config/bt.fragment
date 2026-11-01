@@ -16,3 +16,10 @@ CONFIG_RFKILL=y
 # 蓝牙遥控（BLE HID）经 uhid 注入输入子系统
 CONFIG_UHID=m
 CONFIG_INPUT_UINPUT=y
+# 关掉 unifreq 树自带的 aic8800 厂商 wifi 驱动族：
+# 6.18 起内核对 C23 严格原型默认 -Werror=strict-prototypes（CONFIG_WERROR 已关也照样报错），
+# 该驱动的 aicwf_rx_prealloc.c 过不了这个检查，会中断整核编译；CM311-1a 用不到该芯片
+# CONFIG_AIC8800_SUPPORT is not set
+# CONFIG_AIC8800_SDIO_WLAN is not set
+# CONFIG_AIC8800_USB_WLAN is not set
+# CONFIG_AIC8800_BTUSB_SUPPORT is not set
