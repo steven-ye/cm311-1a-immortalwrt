@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "内核系列（镜像打包使用；自编译还需仓库内有 kernel-config/config-X.Y）"
+        description: "内核系列；6.12.103 = 与 ImmortalWrt 25.12.2 官方版本对齐（源码 gregkh/linux@v6.12.103 自编译）"
         type: choice
         default: "6.6.y"
         options:
           - "6.6.y"
           - "6.12.y"
+          - "6.12.103"
           - "6.18.y"
           - "6.1.y"
       build_kernel:
@@ -48,14 +49,19 @@ jobs:
       - name: 准备内核配置（仓库缺该系列时拉 ophub 模板 + 蓝牙片段）
         run: |
           set -e
-          cfg="kernel-config/config-${KERNEL_SERIES%.y}"
+          series="${KERNEL_SERIES}"
+          case "${series}" in
+            6.12.103) mm="6.12" ;;
+            *) mm="${series%.y}" ;;
+          esac
+          cfg="kernel-config/config-${mm}"
           if [ -s "${cfg}" ]; then
             echo "使用仓库内置 ${cfg}"
           else
             echo "仓库无 ${cfg}，拉取 ophub 模板并追加 bt.fragment"
             curl -fsSL --retry 3 -o "${cfg}" \
-              "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-${KERNEL_SERIES%.y}" \
-              || { echo "::error::无法获取 ${KERNEL_SERIES} 内核配置模板"; exit 1; }
+              "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-${mm}" \
+              || { echo "::error::无法获取 ${series} 内核配置模板"; exit 1; }
             cat kernel-config/bt.fragment >> "${cfg}"
           fi
 
@@ -65,15 +71,21 @@ jobs:
           set -e
           mode="${{ inputs.build_kernel }}"
           series="${KERNEL_SERIES}"
-          mm="${series%.y}"
-          esc="$(echo "${mm}" | sed 's/\./\\./g')"
+          case "${series}" in
+            6.12.103) pat="6\.12\.103\.tar\.gz" ;;
+            *)
+              mm="${series%.y}"
+              esc="$(echo "${mm}" | sed 's/\./\\./g')"
+              pat="${esc}\.[0-9]+\.tar\.gz"
+              ;;
+          esac
           built=true
           if [ "${mode}" = "force" ]; then
             echo "force：强制重新编译 ${series}"
           else
             have="$(curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/kernel_stable" \
-              | grep -oE "\"name\":\s*\"${esc}\.[0-9]+[^\"]*\.tar\.gz\"" | head -n 1 \
+              | grep -oE "\"name\":\s*\"${pat}\"" | head -n 1 \
               | sed -E 's/.*"([^"]+)".*/\1/')"
             if [ -n "${have}" ]; then
               built=false
@@ -84,10 +96,15 @@ jobs:
           fi
           echo "built=${built}" >> "${GITHUB_OUTPUT}"
 
-      - name: 校验内核配置（仓库内置 config-6.6）
+      - name: 校验内核配置（仓库内置 config）
         if: steps.decide.outputs.built == 'true'
         run: |
-          CONFIG_FILE="kernel-config/config-${KERNEL_SERIES%.y}"
+          series="${KERNEL_SERIES}"
+          case "${series}" in
+            6.12.103) mm="6.12" ;;
+            *) mm="${series%.y}" ;;
+          esac
+          CONFIG_FILE="kernel-config/config-${mm}"
           echo "config: ${CONFIG_FILE}"
           test -s "${CONFIG_FILE}" \
             || { echo "::error::缺少 ${CONFIG_FILE}"; exit 1; }
@@ -99,14 +116,26 @@ jobs:
             || { echo "::error::内核配置缺少 CONFIG_BT_HCIUART_RTL=y"; exit 1; }
           grep -q 'CONFIG_SERIAL_DEV_BUS=y' "${CONFIG_FILE}" \
             || { echo "::error::内核配置缺少 CONFIG_SERIAL_DEV_BUS=y（serdev 绑定需要）"; exit 1; }
+          # btrfs 必须是内建：packit 把 rootfs 分区格式化成 btrfs，靠内核直接挂载
+          grep -q 'CONFIG_BTRFS_FS=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_BTRFS_FS=y（rootfs 是 btrfs，需内建）"; exit 1; }
+          # s905l3a 平台驱动必须是内建，否则官方 armsr 配置那种「只有 ACPI SDHCI」的内核根本起不来
+          grep -q 'CONFIG_MMC_MESON_GX=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_MMC_MESON_GX=y（eMMC/SD 控制器）"; exit 1; }
+          grep -q 'CONFIG_DWMAC_MESON=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_DWMAC_MESON=y（有线网卡）"; exit 1; }
+          grep -q 'CONFIG_PINCTRL_MESON_G12A=y' "${CONFIG_FILE}" \
+            || { echo "::error::内核配置缺少 CONFIG_PINCTRL_MESON_G12A=y"; exit 1; }
 
       - name: 编译内核 [ ${{ env.KERNEL_SERIES }} ]
         if: steps.decide.outputs.built == 'true'
         uses: ophub/amlogic-s9xxx-armbian@main
         with:
           build_target: kernel
-          kernel_source: unifreq
+          # 6.12.103 用主线稳定版仓库的该版本标签，版本号与 ImmortalWrt 25.12.2 一致
+          kernel_source: ${{ inputs.kernel_version == '6.12.103' && 'gregkh/linux@v6.12.103' || 'unifreq' }}
           kernel_version: ${{ env.KERNEL_SERIES }}
+          kernel_auto: ${{ inputs.kernel_version == '6.12.103' && 'false' || 'true' }}
           kernel_sign: ${{ env.KERNEL_SIGN }}
           kernel_config: kernel-config
           kernel_package: all
@@ -144,20 +173,35 @@ jobs:
           rm -rf /tmp/dt && mkdir -p /tmp/dt
           tar -xzf "${work}/${top}/${dtbpkg}" -C /tmp/dt
           target="$(find /tmp/dt -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)"
-          test -n "${target}" || { echo "::error::dtb 包内未找到 cm311 dtb"; exit 1; }
-          cp -f "${src}" "${target}"
+          added=0
+          if [ -n "${target}" ]; then
+            # ophub/flippy 源码自带该 dts，直接替换
+            cp -f "${src}" "${target}"
+            echo "replace: ${target}"
+          else
+            # 主线源码没有 cm311 dts，只能把验证过的 dtb 补进 dtb 包
+            cp -f "${src}" /tmp/dt/meson-g12a-s905l3a-cm311.dtb
+            added=1
+            echo "add: /tmp/dt/meson-g12a-s905l3a-cm311.dtb"
+          fi
           # dtb 包是扁平结构（dtb 直接放在根，没有顶层目录），必须整包重打
           n_orig="$(ls -A /tmp/dt | wc -l)"
           tar -czf "${work}/${top}/${dtbpkg}" -C /tmp/dt .
           n_new="$(tar -tzf "${work}/${top}/${dtbpkg}" | wc -l)"
-          echo "dtb members: ${n_orig} -> ${n_new}"
+          echo "dtb members: ${n_orig} (added=${added}) -> ${n_new}"
           [ "${n_new}" -ge "${n_orig}" ] || { echo "::error::dtb 包重组后条目数异常 ${n_new}/${n_orig}"; exit 1; }
           rm -rf /tmp/dt /tmp/dtck && mkdir -p /tmp/dtck
           tar -xzf "${work}/${top}/${dtbpkg}" -C /tmp/dtck
           cmp -s "${src}" "$(find /tmp/dtck -type f -name 'meson-g12a-s905l3a-cm311.dtb' | head -n 1)" \
-            || { echo "::error::dtb 包内 cm311 dtb 未替换成功"; exit 1; }
+            || { echo "::error::dtb 包内 cm311 dtb 未写入成功"; exit 1; }
           rm -rf /tmp/dtck
-          echo "patched dtb: ${target}"
+          echo "cm311 dtb ok (added=${added})"
+
+          # 内核包自带 sha256sums 清单，改动内层包后必须重算，否则打包时会校验失败
+          if [ -f "${work}/${top}/sha256sums" ]; then
+            ( cd "${work}/${top}" && sha256sum $(awk '{print $2}' sha256sums) > sha256sums )
+            echo "sha256sums 已重算"
+          fi
 
           tar -czf "${outer}" -C "${work}" "${top}"
           rm -rf "${work}"
@@ -435,5 +479,5 @@ jobs:
             ### CM311-1a ImmortalWrt ${{ env.IMMORTALWRT_VERSION }}
             - 默认 IP: `192.168.1.1`，默认账号 `root`
             - 蓝牙: RTL8761B（UART 接口，hci_uart + btrtl，bluez 开机自启）
-            - 内核: ophub 预编译包 + 已替换的 CM311 蓝牙 dtb（本仓库 kernel_stable）
+            - 内核: ${{ env.KERNEL_SERIES }}（本仓库自编译，已内置 CM311 蓝牙 dtb，见 kernel_stable）
             - 刷机: 先写 U 盘启动验证，再在「系统 → 晶晨宝盒」安装到 eMMC，设备选 `CM311-1a-YST`
