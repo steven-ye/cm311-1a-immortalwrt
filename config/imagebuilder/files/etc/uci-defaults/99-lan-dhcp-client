@@ -1,0 +1,22 @@
+#!/bin/sh
+# 板子挂在上级路由器后面：LAN 口作为 DHCP 客户端（默认 static 192.168.1.1 会与上级 DHCP 冲突），
+# 同时不再在该口提供 DHCPv4 服务，避免两台 DHCP 服务器打架。
+
+uci -q set network.lan.proto='dhcp'
+uci -q set network.lan.sendclientid='auto'
+uci -q set network.lan.multipath='off'
+uci -q delete network.lan.ipaddr
+uci -q delete network.lan.netmask
+uci -q delete network.lan.gateway
+uci -q delete network.lan.ip6assign
+uci -q delete network.lan.ip6addr
+uci -q delete network.lan.ip6prefix
+uci commit network
+
+uci -q set dhcp.lan.dhcpv4='disabled'
+uci -q set dhcp.lan.ra='hybrid'
+uci -q set dhcp.lan.force='1'
+uci -q set dhcp.lan.ra_default='2'
+uci commit dhcp
+
+exit 0
